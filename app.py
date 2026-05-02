@@ -1,6 +1,6 @@
 import streamlit as st
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="Akut İnme ve Vertigo Karar Destek Sistemi",
@@ -240,7 +240,7 @@ if 'nihss_score' not in st.session_state:
 if 'aspects_score' not in st.session_state:
     st.session_state.aspects_score = 10
 if 'current_time' not in st.session_state:
-    st.session_state.current_time = datetime.now()
+    st.session_state.current_time = datetime.now() + timedelta(hours=3)
 
 # Sidebar navigation
 with st.sidebar:
@@ -805,7 +805,7 @@ elif page == "🧠 Akut İnme":
             last_well_time = st.time_input("Son İyi Görülme Saati", datetime.now().time(), key="last_well_time")
         with col2:
             if st.button("🕐 Şu Anki Saati Al", key="get_current_time"):
-                st.session_state.current_time = datetime.now()
+                st.session_state.current_time = datetime.now() + timedelta(hours=3)
             st.info(f"Kayıt Saati: {st.session_state.current_time.strftime('%H:%M')}")
         with col3:
             symptom_duration = st.text_input("Süre (dakika/saat)", "", key="symptom_duration")
