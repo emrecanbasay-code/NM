@@ -1060,6 +1060,11 @@ elif page == "🧠 Akut İnme":
         - **Açık:** Tamamen uyanık, sorulara anında ve mantıklı yanıt verir.
         - **Uykuya Meyilli:** Uykuludur, sesli uyaranlarla kolayca uyanır, uyaran kesilince tekrar uykuya dalar.
         - **Koma:** Bilinç tamamen kapalı, ağrılı uyaranlara bile anlamlı yanıt vermez.
+        
+        **Oryantasyon:** Hastanın zaman, mekan ve kişi bilgisini değerlendirir.
+        - **Zaman:** Hangi ayda/yılda olduğunu biliyor mu?
+        - **Yer:** Nerede olduğunu biliyor mu?
+        - **Kişi:** Kendini tanıyor mu?
         """)
     
     col1, col2 = st.columns([3, 2])
@@ -1074,6 +1079,49 @@ elif page == "🧠 Akut İnme":
         )
     with col2:
         consciousness_note = st.text_input("Ek Açıklama", "", key="consciousness_note")
+    
+    # Oryantasyon Soruları
+    st.markdown("#### 📍 Oryantasyon Soruları")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        orientation_time = st.radio(
+            "Zaman (Ay/Yıl)",
+            ["Doğru", "Yanlış", "Bilmiyor"],
+            horizontal=True,
+            index=0,
+            key="orientation_time"
+        )
+    with col2:
+        orientation_place = st.radio(
+            "Yer (Neresi)",
+            ["Doğru", "Yanlış", "Bilmiyor"],
+            horizontal=True,
+            index=0,
+            key="orientation_place"
+        )
+    with col3:
+        orientation_person = st.radio(
+            "Kişi (Kendini tanıyor mu)",
+            ["Evet", "Hayır", "Kısmen"],
+            horizontal=True,
+            index=0,
+            key="orientation_person"
+        )
+    
+    # Kooperasyon/Emirleri
+    st.markdown("#### 🤝 Kooperasyon ve Emirlere Uygunluk")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        cooperation = st.radio(
+            "Kooperasyon/Emirler",
+            ["Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)"],
+            horizontal=True,
+            index=0,
+            key="cooperation",
+            label_visibility="collapsed"
+        )
+    with col2:
+        cooperation_note = st.text_input("Ek Açıklama", "", key="cooperation_note", help="Örn: Gözlerini aç/kapat, dişlerini göster vb.")
 
     # Konuşma
     st.markdown("### 💬 Konuşma")
@@ -1429,8 +1477,10 @@ elif page == "🧠 Akut İnme":
 📊 *SKORLAR:*
 • NIHSS: {nihss_input}/42
 
- *NÖROLOJİK MUAYENE::
+🔬 *NÖROLOJİK MUAYENE:*
 • Bilinç: {consciousness}{f' - {consciousness_note}' if consciousness_note else ''}
+• Oryantasyon: Zaman {orientation_time}, Yer {orientation_place}, Kişi {orientation_person}
+• Kooperasyon: {cooperation}{f' - {cooperation_note}' if cooperation_note else ''}
 • Konuşma: {speech}{f' - {speech_note}' if speech_note else ''}
 • Kraniyal/Fasiyal: {facial_exam}{f' - {facial_exam_note}' if facial_exam_note else ''}
 • Pupiller: {pupils}, IR: {light_reflex}{f' - {pupils_note}' if pupils_note else ''}
