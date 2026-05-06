@@ -1,7 +1,479 @@
 import streamlit as st
 import json
+import io
 from datetime import datetime, timedelta
 
+# ==================== AI ASISTAN FONKSİYONLARI ====================
+
+# Sabit System Prompt - Halüsinasyonu engellemek için kesin kurallar
+SYSTEM_PROMPT = """Sen uzman bir nöroloji asistanı ve klinik veri çıkarma motorusun. 
+Görevin, hekimin hasta muayenesi sırasında dikte ettiği metni veya ses kaydını analiz ederek "Akut İnme (Stroke)" değerlendirme formunu doldurmaktır.
+
+KESİN KURALLAR:
+1. SADECE VE SADECE sana verilen kayıt/metin içinde AÇIKÇA belirtilen bilgileri çıkar.
+2. Hekim bir bulguyu, vital değeri veya muayene adımını SÖYLEMEDİYSE, o alanı KESİNLİKLE uydurma, tahmin etme veya varsayma. Karşılığına doğrudan null değerini ata.
+3. Çıktın SADECE VE SADECE geçerli bir JSON objesi olmalıdır. ```json gibi markdown işaretleri EKLEME.
+
+BEKLENEN JSON ŞABLONU VE KABUL EDİLEN DEĞERLER:
+{
+  "hasta_ad_soyad": (Belirtildiyse yaz, yoksa null),
+  "hasta_yas": (Sayısal değer veya null),
+  "hasta_cinsiyet": ("Erkek", "Kadın" veya null),
+  "hasta_kilo": (Sayısal değer kg cinsinden veya null),
+  "son_iyi_gorulme_zamani": (Belirtildiyse yaz, örn: "dün", "2 saat önce", yoksa null),
+  "semptom_baslangic_suresi": (Saat veya süre belirtildiyse yaz, yoksa null),
+  "sikayet": (Hastanın ana şikayeti belirtildiyse yaz, yoksa null),
+  "hikaye": (Hastanın hikayesi belirtildiyse yaz, yoksa null),
+  "kullanilan_ilaclar": (Belirtildiyse yaz, yoksa null),
+  "ozgecmis": (Belirtildiyse yaz, yoksa null),
+  "kronik_hastaliklar": {
+    "hipertansiyon": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "diyabet": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "svo_oykusu": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "malignite": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "kby": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "kah": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "cabg": {"var_mi": (true, false veya null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)},
+    "diger": {"var_mi": (true, false veya null), "hastalik_adi": (Belirtildiyse yaz, yoksa null), "sure": (Belirtildiyse yaz, yoksa null), "aciklama": (Belirtildiyse yaz, yoksa null)}
+  },
+  "sistolik_tansiyon": (Sadece sayı veya null),
+  "diastolik_tansiyon": (Sadece sayı veya null),
+  "kan_sekeri": (Sadece sayı veya null),
+  "ekg_ritmi": ("Sinüs", "Atriyal Fibrilasyon", "Diğer" veya null),
+  "bilinc_durumu": ("Açık", "Uykuya Meyilli", "Koma" veya null),
+  "oryantasyon": {
+    "zaman": ("Doğru", "Yanlış", "Bilmiyor" veya null),
+    "yer": ("Doğru", "Yanlış", "Bilmiyor" veya null),
+    "kisi": ("Evet", "Hayır", "Kısmen" veya null)
+  },
+  "kooperasyon": ("Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)" veya null),
+  "konusma": ("Doğal", "Dizartri", "Afazi" veya null),
+  "fasiyal_muayene": ("Doğal", "Santral Asimetri", "Periferik Asimetri", "Göz Hareket Kısıtlı" veya null),
+  "fasiyal_muayene_aciklama": (Belirtildiyse yaz, örn: "Sağda santral fasyal paralizi", yoksa null),
+  "pupiller": ("İzokorik", "Anizokorik" veya null),
+  "isik_refleksi": ("+/+", "+/-", "-/+", "-/-" veya null),
+  "goz_hareketleri": ("Serbest", "Kısıtlı" veya null),
+  "goz_hareketleri_aciklama": (Belirtildiyse yaz, yoksa null),
+  "gorme_alani": ("Normal", "Hemianopsi", "Hemianopsi+", "Kör" veya null),
+  "gorme_alani_aciklama": (Belirtildiyse yaz, yoksa null),
+  "motor_sag_kol": (0'dan 5'e kadar sayı veya null),
+  "motor_sol_kol": (0'dan 5'e kadar sayı veya null),
+  "motor_sag_bacak": (0'dan 5'e kadar sayı veya null),
+  "motor_sol_bacak": (0'dan 5'e kadar sayı veya null),
+  "motor_sag_kol_aciklama": (Belirtildiyse yaz, yoksa null),
+  "motor_sol_kol_aciklama": (Belirtildiyse yaz, yoksa null),
+  "motor_sag_bacak_aciklama": (Belirtildiyse yaz, yoksa null),
+  "motor_sol_bacak_aciklama": (Belirtildiyse yaz, yoksa null),
+  "serebellar_muayene": ("Normal", "Dismetri", "Disdiadokokinezi", "Hepsi Normal" veya null),
+  "serebellar_aciklama": (Belirtildiyse yaz, yoksa null),
+  "tcr": ("Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt" veya null),
+  "tcr_aciklama": (Belirtildiyse yaz, yoksa null),
+  "duyu_kaybi": (Belirtildiyse yaz, yoksa null),
+  "kontrendikasyonlar": (Belirtildiyse liste olarak yaz, örn: ["Aktif kanama", "INR > 1.7"], yoksa []),
+  "ek_bulgular": (Şablona uymayan ama hekimin belirttiği diğer önemli bulgular, yoksa null)
+}
+
+ÖNEMLİ NOTLAR:
+- Motor güç değerleri 0-5 arası sayısal olmalıdır (örn: "3/5" denmişse 3 yaz).
+- Tansiyon "180/100" denmişse sistolik=180, diastolik=100 olarak ayır.
+- Kronik hastalıklar için hekim "HT'si var, 10 yıldır" derse hipertansiyon.var_mi=true, hipertansiyon.sure="10 yıl" yaz.
+- Kontrendikasyonlar listesi boş olabilir [].
+- Oryantasyon bilgileri ayrı ayrı belirtilmemişse null bırak.
+"""
+
+
+# Whisper için medikal terim ipuçları
+WHISPER_MEDICAL_PROMPT = (
+    "Tıbbi terimler: Hemianopsi, Dizartri, Afazi, Disdiadokokinezi, İzokorik, Anizokorik, "
+    "Babinski, Ekstansör, Fleksör, Serebellar, Dismetri, ASPECTS, NIHSS, TPA, Alteplaz, "
+    "Hipertansiyon, Diabetes Mellitus, Atriyal Fibrilasyon, Sinüs ritmi, Plejik, "
+    "Hemiparezi, Hemipleji, Stupor, Koma, Kooperatif, Oryantasyon, Fasyal paralizi, "
+    "Santral, Periferik, Pupil, Midriyatik, Miyotik, Işık refleksi, Taban cilt refleksi, "
+    "Koroner arter, CABG, Malignite, Kronik böbrek yetmezliği, SVO, İnme, Vertigo, "
+    "Sistolik, Diastolik, EKG, Antikoagülan, NOAK, INR, aPTT, Trombositopeni."
+)
+
+
+def get_groq_response_from_text(clinical_text: str) -> dict:
+    """
+    Groq API'ye serbest klinik metni gönderir ve yapılandırılmış JSON döndürür.
+    llama-3.3-70b-versatile modelini kullanır.
+    """
+    from groq import Groq
+
+    api_key = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=api_key)
+
+    user_prompt = f"""Aşağıdaki klinik metni analiz et ve hasta bilgilerini JSON formatında çıkar:
+
+---
+{clinical_text}
+---
+
+Sadece JSON döndür, başka hiçbir şey yazma."""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+    )
+    
+    try:
+        result = json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError:
+        result = {}
+    
+    return result
+
+
+def get_groq_response_from_audio(audio_bytes: bytes) -> dict:
+    """
+    Groq API'ye ses kaydını gönderir ve yapılandırılmış JSON döndürür.
+    İki aşamalı işlem: Önce whisper-large-v3-turbo ile sesi metne çevirir (STT),
+    sonra elde edilen metni get_groq_response_from_text fonksiyonuna gönderir.
+    """
+    from groq import Groq
+
+    api_key = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=api_key)
+
+    # Aşama 1: Ses kaydını metne çevir (STT) - Medikal terim ipuçları ile
+    audio_file = io.BytesIO(audio_bytes)
+    audio_file.name = "audio.wav"
+    
+    transcription_response = client.audio.transcriptions.create(
+        file=audio_file,
+        model="whisper-large-v3-turbo",
+        language="tr",
+        prompt=WHISPER_MEDICAL_PROMPT,
+        response_format="text"
+    )
+    transcribed_text = transcription_response
+
+    # Aşama 2: Elde edilen metni JSON formatına dönüştür
+    result = get_groq_response_from_text(transcribed_text)
+    return result
+
+
+def apply_ai_data_to_session(ai_result: dict):
+    """
+    AI'dan dönen JSON verisini session_state'e uygular.
+    Sadece null olmayan (None olmayan) değerleri günceller.
+    """
+    # ===== HASTA KİMLİĞİ VE ZAMANLAMA =====
+    
+    # Ad Soyad
+    if ai_result.get("hasta_ad_soyad") is not None:
+        st.session_state.patient_name = str(ai_result["hasta_ad_soyad"])
+
+    # Yaş
+    if ai_result.get("hasta_yas") is not None:
+        try:
+            val = int(ai_result["hasta_yas"])
+            st.session_state.patient_age = max(0, min(val, 120))
+        except (ValueError, TypeError):
+            pass
+
+    # Cinsiyet
+    if ai_result.get("hasta_cinsiyet") is not None:
+        cinsiyet = ai_result["hasta_cinsiyet"]
+        if cinsiyet in ["Kadın", "Erkek"]:
+            st.session_state.patient_gender = cinsiyet
+
+    # Kilo
+    if ai_result.get("hasta_kilo") is not None:
+        try:
+            val = int(ai_result["hasta_kilo"])
+            st.session_state.patient_weight = max(1, min(val, 250))
+        except (ValueError, TypeError):
+            pass
+
+    # Son iyi görülme zamanı
+    if ai_result.get("son_iyi_gorulme_zamani") is not None:
+        st.session_state.last_well_time_text = str(ai_result["son_iyi_gorulme_zamani"])
+
+    # Semptom başlangıç süresi
+    if ai_result.get("semptom_baslangic_suresi") is not None:
+        st.session_state.symptom_duration = str(ai_result["semptom_baslangic_suresi"])
+
+    # Şikayet
+    if ai_result.get("sikayet") is not None:
+        st.session_state.complaint = str(ai_result["sikayet"])
+
+    # Hikaye
+    if ai_result.get("hikaye") is not None:
+        st.session_state.history = str(ai_result["hikaye"])
+
+    # Kullanılan ilaçlar
+    if ai_result.get("kullanilan_ilaclar") is not None:
+        st.session_state.medications = str(ai_result["kullanilan_ilaclar"])
+
+    # Özgeçmiş
+    if ai_result.get("ozgecmis") is not None:
+        st.session_state.medical_history = str(ai_result["ozgecmis"])
+
+    # ===== KRONİK HASTALIKLAR =====
+    kronik = ai_result.get("kronik_hastaliklar")
+    if kronik and isinstance(kronik, dict):
+        # Hipertansiyon
+        ht = kronik.get("hipertansiyon")
+        if ht and isinstance(ht, dict):
+            if ht.get("var_mi") is True:
+                st.session_state.ht_check = True
+                if ht.get("aciklama"):
+                    st.session_state.ht_note = str(ht["aciklama"])
+            elif ht.get("var_mi") is False:
+                st.session_state.ht_check = False
+
+        # Diyabet
+        dm = kronik.get("diyabet")
+        if dm and isinstance(dm, dict):
+            if dm.get("var_mi") is True:
+                st.session_state.dm_check = True
+                if dm.get("aciklama"):
+                    st.session_state.dm_note = str(dm["aciklama"])
+            elif dm.get("var_mi") is False:
+                st.session_state.dm_check = False
+
+        # SVO Öyküsü
+        svo = kronik.get("svo_oykusu")
+        if svo and isinstance(svo, dict):
+            if svo.get("var_mi") is True:
+                st.session_state.svo_check = True
+                if svo.get("aciklama"):
+                    st.session_state.svo_note = str(svo["aciklama"])
+            elif svo.get("var_mi") is False:
+                st.session_state.svo_check = False
+
+        # Malignite
+        mal = kronik.get("malignite")
+        if mal and isinstance(mal, dict):
+            if mal.get("var_mi") is True:
+                st.session_state.malignancy_check = True
+                if mal.get("aciklama"):
+                    st.session_state.malignancy_note = str(mal["aciklama"])
+            elif mal.get("var_mi") is False:
+                st.session_state.malignancy_check = False
+
+        # KBY
+        kby = kronik.get("kby")
+        if kby and isinstance(kby, dict):
+            if kby.get("var_mi") is True:
+                st.session_state.ckd_check = True
+                if kby.get("aciklama"):
+                    st.session_state.ckd_note = str(kby["aciklama"])
+            elif kby.get("var_mi") is False:
+                st.session_state.ckd_check = False
+
+        # KAH
+        kah = kronik.get("kah")
+        if kah and isinstance(kah, dict):
+            if kah.get("var_mi") is True:
+                st.session_state.cad_check = True
+                if kah.get("aciklama"):
+                    st.session_state.cad_note = str(kah["aciklama"])
+            elif kah.get("var_mi") is False:
+                st.session_state.cad_check = False
+
+        # CABG
+        cabg = kronik.get("cabg")
+        if cabg and isinstance(cabg, dict):
+            if cabg.get("var_mi") is True:
+                st.session_state.cabg_check = True
+                if cabg.get("aciklama"):
+                    st.session_state.cabg_note = str(cabg["aciklama"])
+            elif cabg.get("var_mi") is False:
+                st.session_state.cabg_check = False
+
+        # Diğer
+        diger = kronik.get("diger")
+        if diger and isinstance(diger, dict):
+            if diger.get("var_mi") is True:
+                st.session_state.other_chronic_check = True
+                if diger.get("hastalik_adi"):
+                    st.session_state.other_chronic = str(diger["hastalik_adi"])
+                if diger.get("aciklama"):
+                    st.session_state.other_chronic_note = str(diger["aciklama"])
+            elif diger.get("var_mi") is False:
+                st.session_state.other_chronic_check = False
+
+    # ===== VİTAL BULGULAR =====
+    
+    # Sistolik tansiyon
+    if ai_result.get("sistolik_tansiyon") is not None:
+        try:
+            val = int(ai_result["sistolik_tansiyon"])
+            st.session_state.sbp = max(0, min(val, 300))
+        except (ValueError, TypeError):
+            pass
+
+    # Diyastolik tansiyon
+    if ai_result.get("diastolik_tansiyon") is not None:
+        try:
+            val = int(ai_result["diastolik_tansiyon"])
+            st.session_state.dbp = max(0, min(val, 200))
+        except (ValueError, TypeError):
+            pass
+
+    # Kan şekeri
+    if ai_result.get("kan_sekeri") is not None:
+        try:
+            val = int(ai_result["kan_sekeri"])
+            st.session_state.bg = max(0, min(val, 600))
+        except (ValueError, TypeError):
+            pass
+
+    # EKG Ritmi
+    if ai_result.get("ekg_ritmi") is not None:
+        ekg = ai_result["ekg_ritmi"]
+        ekg_options = ["Sinüs", "Atriyal Fibrilasyon", "Diğer"]
+        if ekg in ekg_options:
+            st.session_state.ecg_rhythm = ekg
+
+    # ===== NÖROLOJİK MUAYENE =====
+    
+    # Bilinç durumu
+    if ai_result.get("bilinc_durumu") is not None:
+        bilinc = ai_result["bilinc_durumu"]
+        bilinc_options = ["Açık", "Uykuya Meyilli", "Koma"]
+        if bilinc in bilinc_options:
+            st.session_state.consciousness = bilinc
+
+    # Oryantasyon
+    oryantasyon = ai_result.get("oryantasyon")
+    if oryantasyon and isinstance(oryantasyon, dict):
+        if oryantasyon.get("zaman") is not None:
+            zaman = oryantasyon["zaman"]
+            if zaman in ["Doğru", "Yanlış", "Bilmiyor"]:
+                st.session_state.orientation_time = zaman
+        if oryantasyon.get("yer") is not None:
+            yer = oryantasyon["yer"]
+            if yer in ["Doğru", "Yanlış", "Bilmiyor"]:
+                st.session_state.orientation_place = yer
+        if oryantasyon.get("kisi") is not None:
+            kisi = oryantasyon["kisi"]
+            if kisi in ["Evet", "Hayır", "Kısmen"]:
+                st.session_state.orientation_person = kisi
+
+    # Kooperasyon
+    if ai_result.get("kooperasyon") is not None:
+        koop = ai_result["kooperasyon"]
+        koop_options = ["Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)"]
+        if koop in koop_options:
+            st.session_state.cooperation = koop
+
+    # Konuşma
+    if ai_result.get("konusma") is not None:
+        konusma = ai_result["konusma"]
+        konusma_options = ["Doğal", "Dizartri", "Afazi"]
+        if konusma in konusma_options:
+            st.session_state.speech = konusma
+
+    # Fasiyal muayene
+    if ai_result.get("fasiyal_muayene") is not None:
+        fasiyal = ai_result["fasiyal_muayene"]
+        fasiyal_options = ["Doğal", "Santral Asimetri", "Periferik Asimetri", "Göz Hareket Kısıtlı"]
+        if fasiyal in fasiyal_options:
+            st.session_state.facial_exam = fasiyal
+    
+    if ai_result.get("fasiyal_muayene_aciklama") is not None:
+        st.session_state.facial_exam_note = str(ai_result["fasiyal_muayene_aciklama"])
+
+    # Pupiller
+    if ai_result.get("pupiller") is not None:
+        pupil = ai_result["pupiller"]
+        pupil_options = ["İzokorik", "Anizokorik"]
+        if pupil in pupil_options:
+            st.session_state.pupils = pupil
+
+    # Işık refleksi
+    if ai_result.get("isik_refleksi") is not None:
+        ir = ai_result["isik_refleksi"]
+        ir_options = ["+/+", "+/-", "-/+", "-/-"]
+        if ir in ir_options:
+            st.session_state.light_reflex = ir
+
+    # Göz hareketleri
+    if ai_result.get("goz_hareketleri") is not None:
+        goz = ai_result["goz_hareketleri"]
+        goz_options = ["Serbest", "Kısıtlı"]
+        if goz in goz_options:
+            st.session_state.gaze_movement = goz
+    
+    if ai_result.get("goz_hareketleri_aciklama") is not None:
+        st.session_state.gaze_note = str(ai_result["goz_hareketleri_aciklama"])
+
+    # Görme alanı
+    if ai_result.get("gorme_alani") is not None:
+        gorme = ai_result["gorme_alani"]
+        gorme_options = ["Normal", "Hemianopsi", "Hemianopsi+", "Kör"]
+        if gorme in gorme_options:
+            st.session_state.visual_field = gorme
+    
+    if ai_result.get("gorme_alani_aciklama") is not None:
+        st.session_state.visual_field_note = str(ai_result["gorme_alani_aciklama"])
+
+    # Motor muayene - Sayısal değerler (0-5)
+    motor_fields = {
+        "motor_sag_kol": "motor_right",
+        "motor_sol_kol": "motor_left",
+        "motor_sag_bacak": "motor_right_leg",
+        "motor_sol_bacak": "motor_left_leg",
+    }
+    for json_key, session_key in motor_fields.items():
+        if ai_result.get(json_key) is not None:
+            try:
+                val = int(ai_result[json_key])
+                if 0 <= val <= 5:
+                    st.session_state[session_key] = val
+            except (ValueError, TypeError):
+                pass
+
+    # Motor açıklamalar
+    motor_note_fields = {
+        "motor_sag_kol_aciklama": "motor_right_note",
+        "motor_sol_kol_aciklama": "motor_left_note",
+        "motor_sag_bacak_aciklama": "motor_right_leg_note",
+        "motor_sol_bacak_aciklama": "motor_left_leg_note",
+    }
+    for json_key, session_key in motor_note_fields.items():
+        if ai_result.get(json_key) is not None:
+            st.session_state[session_key] = str(ai_result[json_key])
+
+    # Serebellar muayene
+    if ai_result.get("serebellar_muayene") is not None:
+        serebellar = ai_result["serebellar_muayene"]
+        serebellar_options = ["Normal", "Dismetri", "Disdiadokokinezi", "Hepsi Normal"]
+        if serebellar in serebellar_options:
+            st.session_state.cerebellar = serebellar
+    
+    if ai_result.get("serebellar_aciklama") is not None:
+        st.session_state.cerebellar_note = str(ai_result["serebellar_aciklama"])
+
+    # Taban Cilt Refleksi (TCR)
+    if ai_result.get("tcr") is not None:
+        tcr_val = ai_result["tcr"]
+        tcr_options = ["Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"]
+        if tcr_val in tcr_options:
+            st.session_state.tcr = tcr_val
+    
+    if ai_result.get("tcr_aciklama") is not None:
+        st.session_state.tcr_note = str(ai_result["tcr_aciklama"])
+
+    # Duyu kaybı
+    if ai_result.get("duyu_kaybi") is not None:
+        st.session_state.duyu_kaybi = str(ai_result["duyu_kaybi"])
+
+    # Ek bulgular
+    if ai_result.get("ek_bulgular") is not None:
+        st.session_state.ek_bulgular = str(ai_result["ek_bulgular"])
+
+
+# ==================== SAYFA YAPILANDIRMASI ====================
 st.set_page_config(
     page_title="Akut İnme ve Vertigo Karar Destek Sistemi",
     page_icon="🏥",
@@ -231,6 +703,19 @@ st.markdown("""
         border-top: 2px solid var(--hairline);
         margin: 32px 0;
     }
+
+    .ai-assistant-box {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 16px;
+        padding: 4px;
+        margin-bottom: 24px;
+    }
+
+    .ai-assistant-inner {
+        background-color: var(--canvas);
+        border-radius: 13px;
+        padding: 24px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -241,6 +726,10 @@ if 'aspects_score' not in st.session_state:
     st.session_state.aspects_score = 10
 if 'current_time' not in st.session_state:
     st.session_state.current_time = datetime.now() + timedelta(hours=3)
+if 'ai_last_result' not in st.session_state:
+    st.session_state.ai_last_result = None
+if 'ai_transcribed_text' not in st.session_state:
+    st.session_state.ai_transcribed_text = None
 
 # Sidebar navigation
 with st.sidebar:
@@ -787,6 +1276,94 @@ elif page == "🧠 Akut İnme":
     st.markdown("# 🧠 Akut İnme Karar Destek ve Hızlı Muayene Sistemi")
     st.markdown("---")
 
+    # ==================== AI ASISTAN BÖLÜMÜ ====================
+    with st.expander("🤖 AI Asistan - Otomatik Form Doldurma", expanded=False):
+        st.markdown("""
+        <div class='info-box'>
+            <p><strong>💡 Kullanım:</strong> Hasta bilgilerini aşağıdaki sekmelerden birini kullanarak girin. 
+            Klavye/dikte ile yazın ya da doğrudan ses kaydederek AI'nın formu otomatik doldurmasını sağlayın.<br>
+            <strong>⚠️ Önemli:</strong> AI sadece sizin söylediğiniz/yazdığınız bilgileri çıkarır, hiçbir veriyi uydurmaz.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        tab_text, tab_audio = st.tabs(["✍️ Klavye / Dikte ile Yaz", "🎙️ Doğrudan Ses Kaydet"])
+
+        # ===== TAB 1: METİN GİRİŞİ =====
+        with tab_text:
+            clinical_text = st.text_area(
+                "Klinik Metin",
+                height=150,
+                placeholder="Örnek: 72 yaşında erkek hasta, 80 kilo, bilinç açık, tansiyonu 180/100, kan şekeri 120, sol kol 2/5, sol bacak 3/5, konuşma dizartrik, babinski sağda ekstansör, HT ve DM öyküsü var, aspirin kullanıyor...",
+                key="ai_clinical_text",
+                help="Hastanın muayene bulgularını doğal dilde yazın veya cihazınızın mikrofon tuşuyla dikte edin."
+            )
+
+            col_btn1, col_btn2 = st.columns([1, 3])
+            with col_btn1:
+                ai_text_submit = st.button("🚀 Metinden Formu Doldur", key="ai_text_submit_btn", use_container_width=True)
+            with col_btn2:
+                st.markdown("<p style='font-size: 12px; color: #888; padding-top: 12px;'>Llama 3.3 70B (Groq) ile analiz edilecektir.</p>", unsafe_allow_html=True)
+
+            if ai_text_submit:
+                if not clinical_text or clinical_text.strip() == "":
+                    st.warning("⚠️ Lütfen önce klinik metni girin.")
+                else:
+                    try:
+                        with st.spinner("🔄 AI metni analiz ediyor ve form alanlarını dolduruyor..."):
+                            ai_result = get_groq_response_from_text(clinical_text)
+                            st.session_state.ai_last_result = ai_result
+                            apply_ai_data_to_session(ai_result)
+                        
+                        st.success("✅ Form başarıyla dolduruldu!")
+                        st.rerun()
+
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ JSON Parse Hatası: AI'dan gelen yanıt geçerli bir JSON formatında değil. Lütfen tekrar deneyin.\n\nHata: {str(e)}")
+                    except KeyError as e:
+                        st.error(f"❌ API Anahtarı Hatası: Lütfen Streamlit Secrets'a 'GROQ_API_KEY' ekleyin.\n\nHata: {str(e)}")
+                    except Exception as e:
+                        st.error(f"❌ Beklenmeyen Hata: {str(e)}\n\nLütfen tekrar deneyin veya metni daha açık yazın.")
+
+        # ===== TAB 2: SES KAYDI =====
+        with tab_audio:
+            st.markdown("<p style='font-size: 14px; color: #555;'>Mikrofon butonuna basın, muayene bulgularını söyleyin ve kaydı durdurun.</p>", unsafe_allow_html=True)
+            
+            audio_value = st.audio_input("🎙️ Ses kaydı yapın", key="ai_audio_input")
+
+            col_btn1, col_btn2 = st.columns([1, 3])
+            with col_btn1:
+                ai_audio_submit = st.button("🚀 Sesi Analiz Et ve Formu Doldur", key="ai_audio_submit_btn", use_container_width=True)
+            with col_btn2:
+                st.markdown("<p style='font-size: 12px; color: #888; padding-top: 12px;'>Whisper + Llama 3.3 70B (Groq) ile analiz edilecektir.</p>", unsafe_allow_html=True)
+
+            if ai_audio_submit:
+                if audio_value is None:
+                    st.warning("⚠️ Lütfen önce bir ses kaydı yapın.")
+                else:
+                    try:
+                        with st.spinner("🔄 AI ses kaydını analiz ediyor ve form alanlarını dolduruyor..."):
+                            audio_bytes = audio_value.read()
+                            ai_result = get_groq_response_from_audio(audio_bytes)
+                            st.session_state.ai_last_result = ai_result
+                            apply_ai_data_to_session(ai_result)
+                        
+                        st.success("✅ Ses kaydı analiz edildi ve form dolduruldu!")
+                        st.rerun()
+
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ JSON Parse Hatası: AI'dan gelen yanıt geçerli bir JSON formatında değil. Lütfen tekrar deneyin.\n\nHata: {str(e)}")
+                    except KeyError as e:
+                        st.error(f"❌ API Anahtarı Hatası: Lütfen Streamlit Secrets'a 'GROQ_API_KEY' ekleyin.\n\nHata: {str(e)}")
+                    except Exception as e:
+                        st.error(f"❌ Beklenmeyen Hata: {str(e)}\n\nLütfen tekrar deneyin veya sesi daha net kaydedin.")
+
+        # Son AI sonucunu göster (debug/şeffaflık için)
+        if st.session_state.ai_last_result:
+            with st.expander("🔍 Son AI Çıktısı (JSON)", expanded=False):
+                st.json(st.session_state.ai_last_result)
+
+    st.markdown("---")
+
     # Hasta Kimliği ve Zamanlama
     with st.expander("👤 Hastanın Kimliği ve Zamanlama", expanded=True):
         col1, col2, col3, col4 = st.columns(4)
@@ -1201,6 +1778,7 @@ elif page == "🧠 Akut İnme":
             key="pupils",
             label_visibility="collapsed"
         )
+    with col2:
         light_reflex = st.radio(
             "Işık Refleksi (IR)",
             ["+/+", "+/-", "-/+", "-/-"],
@@ -1209,7 +1787,7 @@ elif page == "🧠 Akut İnme":
             key="light_reflex",
             label_visibility="collapsed"
         )
-    with col2:
+    with col3:
         pupils_note = st.text_input("Ek Açıklama", "", key="pupils_note")
 
     # Göz Hareketleri (Gaze)
@@ -1398,6 +1976,7 @@ elif page == "🧠 Akut İnme":
         # TPA uygunluk kararı
         tpa_contraindicated = False
         reasons = []
+
         if contraindications:
             tpa_contraindicated = True
             reasons.append("Kontrendikasyon")
@@ -1677,6 +2256,21 @@ elif page == "🌀 Vertigo (HINTS)":
 
         risk_status = "🚨 SANTRAL VERTİGO / İNME ŞÜPHESİ" if central_risk else "✅ Periferik Vertigo"
 
+        # Risk factors for vertigo
+        risk_factors = []
+        if has_severe_headache:
+            risk_factors.append("✓ Şiddetli Baş/Ense Ağrısı (Kırmızı Bayrak)")
+        if has_visual_disturbance:
+            risk_factors.append("✓ Görme Bozukluğu/Çift Görme (Kırmızı Bayrak)")
+        if has_central_nystagmus:
+            risk_factors.append("✓ Santral Nistagmus")
+        if has_central_skew:
+            risk_factors.append("✓ Pozitif Test of Skew")
+        if has_normal_head_impulse:
+            risk_factors.append("✓ Normal Head Impulse (ile şiddetli vertigo!)")
+        if has_hearing_loss:
+            risk_factors.append("✓ Yeni İşitme Kaybı (AICA)")
+
         vertigo_whatsapp_summary = f"""
 🌀 *VERTIGO HANDOVER (HINTS)*
 📅 {timestamp}
@@ -1721,6 +2315,6 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; padding: 32px; color: var(--primary-active);'>
     <p><strong>⚠️ YASAL UYARI:</strong> Bu uygulama tıbbi kararı desteklemek için tasarlanmıştır, hekim klinik değerlendirmesinin yerini tutmaz.</p>
-    <p style='font-size: 12px; margin-top: 8px;'>Akut İnme ve Vertigo Karar Destek Sistemi v2.0</p>
+    <p style='font-size: 12px; margin-top: 8px;'>Akut İnme ve Vertigo Karar Destek Sistemi v2.2 (AI Destekli - Genişletilmiş JSON)</p>
 </div>
 """, unsafe_allow_html=True)
