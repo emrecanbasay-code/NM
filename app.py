@@ -1,7 +1,102 @@
 import streamlit as st
 import json
 import io
+import random
+import string
 from datetime import datetime, timedelta
+
+# ==================== FIREBASE FIRESTORE ENTEGRASYONU ====================
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+def init_firebase():
+    """
+    Firebase'i st.secrets üzerinden başlatır.
+    Streamlit Cloud'da Settings > Secrets bölümüne Firebase service account JSON'u eklenir.
+    """
+    if not firebase_admin._apps:
+        # st.secrets["firebase"] altındaki tüm alanları dict olarak al
+        firebase_creds = dict(st.secrets["firebase"])
+        cred = credentials.Certificate(firebase_creds)
+        firebase_admin.initialize_app(cred)
+    return firestore.client()
+
+
+def generate_transfer_code(db) -> str:
+    """
+    Benzersiz 4 haneli transfer kodu üretir.
+    Mevcut kodlarla çakışmadığından emin olur.
+    """
+    while True:
+        code = ''.join(random.choices(string.digits, k=4))
+        # Aynı kodun zaten var olup olmadığını kontrol et
+        existing = db.collection("handovers").where("transfer_code", "==", code).limit(1).get()
+        if not existing:
+            return code
+
+
+def save_handover(db, summary_text: str) -> str:
+    """
+    WhatsApp handover metnini Firestore'a kaydeder.
+    Returns: 4 haneli transfer kodu
+    """
+    code = generate_transfer_code(db)
+    now = datetime.utcnow()
+    expiration = now + timedelta(hours=72)
+
+    doc_data = {
+        "transfer_code": code,
+        "summary_text": summary_text,
+        "created_at": now,
+        "access_count": 0,
+        "expiration_date": expiration,  # Firestore TTL bu alanı kullanacak
+    }
+
+    db.collection("handovers").add(doc_data)
+    return code
+
+
+def get_handover(db, code: str) -> dict | None:
+    """
+    Transfer kodu ile handover verisini getirir.
+    Erişim sayacını 1 artırır.
+    Süresi dolmuş kayıtları döndürmez.
+    """
+    docs = db.collection("handovers").where("transfer_code", "==", code).limit(1).get()
+
+    if not docs:
+        return None
+
+    doc = docs[0]
+    data = doc.to_dict()
+
+    # Süre kontrolü (client-side ek güvenlik)
+    expiration = data.get("expiration_date")
+    if expiration:
+        # Firestore Timestamp'ı datetime'a çevir
+        if hasattr(expiration, 'timestamp'):
+            exp_dt = expiration
+        else:
+            exp_dt = expiration
+
+        now = datetime.utcnow()
+        # Firestore timestamp karşılaştırması
+        try:
+            if hasattr(exp_dt, 'seconds'):
+                exp_datetime = datetime.utcfromtimestamp(exp_dt.seconds)
+            else:
+                exp_datetime = exp_dt
+            
+            if now > exp_datetime:
+                return {"expired": True}
+        except Exception:
+            pass
+
+    # Erişim sayacını artır
+    doc.reference.update({"access_count": firestore.Increment(1)})
+
+    return data
+
 
 # ==================== AI ASISTAN FONKSİYONLARI ====================
 
@@ -716,6 +811,27 @@ st.markdown("""
         border-radius: 13px;
         padding: 24px;
     }
+
+    .transfer-code-display {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 16px;
+        padding: 32px;
+        text-align: center;
+        margin: 24px 0;
+    }
+
+    .transfer-code-display h1 {
+        color: white !important;
+        font-size: 64px !important;
+        letter-spacing: 12px !important;
+        margin: 0 !important;
+    }
+
+    .transfer-code-display p {
+        color: rgba(255,255,255,0.8);
+        font-size: 14px;
+        margin-top: 8px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -730,6 +846,10 @@ if 'ai_last_result' not in st.session_state:
     st.session_state.ai_last_result = None
 if 'ai_transcribed_text' not in st.session_state:
     st.session_state.ai_transcribed_text = None
+if 'transfer_code_generated' not in st.session_state:
+    st.session_state.transfer_code_generated = None
+if 'whatsapp_summary_text' not in st.session_state:
+    st.session_state.whatsapp_summary_text = None
 
 # Sidebar navigation
 with st.sidebar:
@@ -742,12 +862,150 @@ with st.sidebar:
 
     page = st.radio(
         "Sayfa Seçimi",
-        ["🧠 Akut İnme", "🌀 Vertigo (HINTS)", "📊 NIHSS Hesaplayıcı", "🧫 ASPECTS Hesaplayıcı"],
+        ["🧠 Akut İnme", "🌀 Vertigo (HINTS)", "📊 NIHSS Hesaplayıcı", "🧫 ASPECTS Hesaplayıcı", "📤 Vaka Transfer"],
         label_visibility="collapsed"
     )
 
+
+# ==================== VAKA TRANSFER SAYFASI ====================
+if page == "📤 Vaka Transfer":
+    st.markdown("# 📤 Vaka Transfer (Handover)")
+    st.markdown("---")
+
+    st.markdown("""
+    <div class='info-box'>
+        <p><strong>ℹ️ Vaka Transfer Sistemi:</strong><br>
+        Hasta verilerini güvenli bir şekilde 4 haneli kod ile paylaşın. Veriler <strong>72 saat</strong> sonra otomatik olarak silinir.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab_send, tab_receive = st.tabs(["📤 Vaka Gönder", "📥 Vaka Al"])
+
+    # ===== TAB 1: VAKA GÖNDER =====
+    with tab_send:
+        st.markdown("### 📤 Vaka Gönder")
+        st.markdown("Aşağıdaki metin kutusuna handover metnini yapıştırın veya 'Akut İnme' sayfasındaki WhatsApp özetini kullanın.")
+
+        # Eğer WhatsApp özeti session_state'de varsa otomatik doldur
+        default_text = st.session_state.get("whatsapp_summary_text", "")
+
+        handover_text = st.text_area(
+            "Handover Metni",
+            value=default_text,
+            height=300,
+            placeholder="WhatsApp handover metnini buraya yapıştırın veya 'Akut İnme' sayfasında 'Kaydet ve WhatsApp Özeti Oluştur' butonuna basın...",
+            key="handover_text_input"
+        )
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            send_button = st.button("🔑 Kod Üret ve Gönder", key="send_handover_btn", use_container_width=True)
+        with col2:
+            st.markdown("<p style='font-size: 12px; color: #888; padding-top: 12px;'>Veri 72 saat sonra otomatik silinecektir.</p>", unsafe_allow_html=True)
+
+        if send_button:
+            if not handover_text or handover_text.strip() == "":
+                st.warning("⚠️ Lütfen önce handover metnini girin.")
+            else:
+                try:
+                    with st.spinner("🔄 Firebase'e kaydediliyor ve kod üretiliyor..."):
+                        db = init_firebase()
+                        code = save_handover(db, handover_text.strip())
+                        st.session_state.transfer_code_generated = code
+
+                    st.success("✅ Vaka başarıyla kaydedildi!")
+
+                    st.markdown(f"""
+                    <div class='transfer-code-display'>
+                        <p>Transfer Kodu</p>
+                        <h1>{code}</h1>
+                        <p>Bu kodu alıcıya iletin. Kod 72 saat geçerlidir.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Kodu kopyalamak için text input
+                    st.code(code, language=None)
+
+                except Exception as e:
+                    st.error(f"❌ Firebase Hatası: {str(e)}\n\nLütfen Firebase yapılandırmasını kontrol edin.")
+
+        # Daha önce üretilmiş kodu göster
+        if st.session_state.transfer_code_generated and not send_button:
+            st.markdown(f"""
+            <div class='transfer-code-display'>
+                <p>Son Üretilen Transfer Kodu</p>
+                <h1>{st.session_state.transfer_code_generated}</h1>
+                <p>Bu kodu alıcıya iletin. Kod 72 saat geçerlidir.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ===== TAB 2: VAKA AL =====
+    with tab_receive:
+        st.markdown("### 📥 Vaka Al")
+        st.markdown("Size iletilen 4 haneli transfer kodunu girerek hasta verisini görüntüleyin.")
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            receive_code = st.text_input(
+                "Transfer Kodu",
+                max_chars=4,
+                placeholder="0000",
+                key="receive_code_input",
+                help="4 haneli sayısal kodu girin"
+            )
+        with col2:
+            receive_button = st.button("🔍 Vakayı Getir", key="receive_handover_btn", use_container_width=True)
+
+        if receive_button:
+            if not receive_code or len(receive_code) != 4 or not receive_code.isdigit():
+                st.warning("⚠️ Lütfen geçerli bir 4 haneli kod girin.")
+            else:
+                try:
+                    with st.spinner("🔄 Vaka aranıyor..."):
+                        db = init_firebase()
+                        result = get_handover(db, receive_code)
+
+                    if result is None:
+                        st.error("❌ Bu kodla eşleşen bir vaka bulunamadı. Kodu kontrol edin.")
+                    elif result.get("expired"):
+                        st.error("⏰ Bu vakanın süresi dolmuş (72 saat). Veri artık erişilemez.")
+                    else:
+                        st.success("✅ Vaka bulundu!")
+
+                        # Erişim bilgisi
+                        access_count = result.get("access_count", 0)
+                        created_at = result.get("created_at")
+                        if created_at and hasattr(created_at, 'strftime'):
+                            created_str = created_at.strftime("%d.%m.%Y %H:%M")
+                        elif created_at and hasattr(created_at, 'seconds'):
+                            created_str = datetime.utcfromtimestamp(created_at.seconds).strftime("%d.%m.%Y %H:%M")
+                        else:
+                            created_str = "-"
+
+                        st.markdown(f"""
+                        <div class='info-box'>
+                            <p><strong>📋 Vaka Bilgisi:</strong><br>
+                            Oluşturulma: {created_str} UTC | Erişim Sayısı: {access_count + 1}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        # Handover metnini göster
+                        summary = result.get("summary_text", "")
+                        st.markdown(f"""
+                        <div class='whatsapp-output'>
+{summary}
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        # Kopyalanabilir metin
+                        st.code(summary, language=None)
+
+                except Exception as e:
+                    st.error(f"❌ Firebase Hatası: {str(e)}\n\nLütfen bağlantınızı kontrol edin.")
+
+
 # ==================== NIHSS HESAPLAYICI SAYFASI ====================
-if page == "📊 NIHSS Hesaplayıcı":
+elif page == "📊 NIHSS Hesaplayıcı":
     st.markdown("# 📊 Detaylı NIHSS Hesaplayıcı")
     st.markdown("---")
 
@@ -777,13 +1035,7 @@ if page == "📊 NIHSS Hesaplayıcı":
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        consciousness_1a = st.radio(
-            "1a - Bilinç Seviyesi",
-            ["Alert (0)", "Drowsy (1)", "Stupor (2)", "Coma (3)"],
-            horizontal=True,
-            index=0,
-            key="nihss_1a"
-        )
+        consciousness_1a = st.radio("1a - Bilinç Seviyesi", ["Alert (0)", "Drowsy (1)", "Stupor (2)", "Coma (3)"], horizontal=True, index=0, key="nihss_1a")
     with col2:
         st.markdown(f"**Puan:** {consciousness_1a.split('(')[1].split(')')[0]}")
 
@@ -806,21 +1058,9 @@ if page == "📊 NIHSS Hesaplayıcı":
 
     col1, col2 = st.columns(2)
     with col1:
-        q1 = st.radio(
-            "Ay - Yaş",
-            ["İkisi de doğru (0)", "Bir doğru (1)", "Hiçbiri doğru (2)"],
-            horizontal=True,
-            index=0,
-            key="nihss_1b_q1"
-        )
+        q1 = st.radio("Ay - Yaş", ["İkisi de doğru (0)", "Bir doğru (1)", "Hiçbiri doğru (2)"], horizontal=True, index=0, key="nihss_1b_q1")
     with col2:
-        q2 = st.radio(
-            "Ay - Yer",
-            ["İkisi de doğru (0)", "Bir doğru (1)", "Hiçbiri doğru (2)"],
-            horizontal=True,
-            index=0,
-            key="nihss_1b_q2"
-        )
+        q2 = st.radio("Ay - Yer", ["İkisi de doğru (0)", "Bir doğru (1)", "Hiçbiri doğru (2)"], horizontal=True, index=0, key="nihss_1b_q2")
 
     st.markdown("### 3. Bilinç Emirleri (1c)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -839,13 +1079,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Hasta traube veya etkili cevap veremiyorsa 0 puan verilir.
         """)
 
-    commands = st.radio(
-        "Aç/Kapat gözleri",
-        ["İkisi de yapar (0)", "Bir yapar (1)", "Hiçbiri yapmaz (2)"],
-        horizontal=True,
-        index=0,
-        key="nihss_1c"
-    )
+    commands = st.radio("Aç/Kapat gözleri", ["İkisi de yapar (0)", "Bir yapar (1)", "Hiçbiri yapmaz (2)"], horizontal=True, index=0, key="nihss_1c")
 
     st.markdown("### 4. En İyi Gaze (2)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -864,13 +1098,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Komanın nedeni (beyin sapı vs. hemisferik) değerlendirmesinde kritik.
         """)
 
-    gaze = st.radio(
-        "Göz Bakışları",
-        ["Normal (0)", "Paralizi var (1)", "Deviasyon var (2)"],
-        horizontal=True,
-        index=0,
-        key="nihss_2"
-    )
+    gaze = st.radio("Göz Bakışları", ["Normal (0)", "Paralizi var (1)", "Deviasyon var (2)"], horizontal=True, index=0, key="nihss_2")
 
     st.markdown("### 5. Görme Alanı (3)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -891,13 +1119,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Hasta görmediğini söyleyemezse test yapılamaz, 0 puan verilir.
         """)
 
-    visual = st.radio(
-        "Görme Alanı",
-        ["Normal (0)", "Hemianopsi (1)", "Hemianopsi+ (2)", "Kör (3)"],
-        horizontal=True,
-        index=0,
-        key="nihss_3"
-    )
+    visual = st.radio("Görme Alanı", ["Normal (0)", "Hemianopsi (1)", "Hemianopsi+ (2)", "Kör (3)"], horizontal=True, index=0, key="nihss_3")
 
     st.markdown("### 6. Fasiyal Felç (4)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -919,13 +1141,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Santral (üzerinde) ve periferik (altında) ayrımı önemlidir.
         """)
 
-    facial = st.radio(
-        "Fasiyal Paresi",
-        ["Normal (0)", "Hafif (1)", "Paralizi (2)", "Tam (3)"],
-        horizontal=True,
-        index=0,
-        key="nihss_4"
-    )
+    facial = st.radio("Fasiyal Paresi", ["Normal (0)", "Hafif (1)", "Paralizi (2)", "Tam (3)"], horizontal=True, index=0, key="nihss_4")
 
     st.markdown("### 7. Motor - Sol Üst Ekstremite (5a)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -947,13 +1163,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Ağrılı uyaranlara yanıtta bile değerlendirilir.
         """)
 
-    left_arm = st.radio(
-        "Sol Kol",
-        ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"],
-        horizontal=True,
-        index=0,
-        key="nihss_5a"
-    )
+    left_arm = st.radio("Sol Kol", ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"], horizontal=True, index=0, key="nihss_5a")
 
     st.markdown("### 8. Motor - Sağ Üst Ekstremite (5b)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -975,13 +1185,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Ağrılı uyaranlara yanıtta bile değerlendirilir.
         """)
 
-    right_arm = st.radio(
-        "Sağ Kol",
-        ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"],
-        horizontal=True,
-        index=0,
-        key="nihss_5b"
-    )
+    right_arm = st.radio("Sağ Kol", ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"], horizontal=True, index=0, key="nihss_5b")
 
     st.markdown("### 9. Motor - Sol Alt Ekstremite (6a)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1003,13 +1207,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Ağrılı uyaranlara yanıtta bile değerlendirilir.
         """)
 
-    left_leg = st.radio(
-        "Sol Bacak",
-        ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"],
-        horizontal=True,
-        index=0,
-        key="nihss_6a"
-    )
+    left_leg = st.radio("Sol Bacak", ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"], horizontal=True, index=0, key="nihss_6a")
 
     st.markdown("### 10. Motor - Sağ Alt Ekstremite (6b)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1031,13 +1229,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Ağrılı uyaranlara yanıtta bile değerlendirilir.
         """)
 
-    right_leg = st.radio(
-        "Sağ Bacak",
-        ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"],
-        horizontal=True,
-        index=0,
-        key="nihss_6b"
-    )
+    right_leg = st.radio("Sağ Bacak", ["Normal (0)", "Hafif (1)", "Orta (2)", "Ağır (3)", "Tam (4)"], horizontal=True, index=0, key="nihss_6b")
 
     st.markdown("### 11. Ataksi (7)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1057,13 +1249,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Yeterli motor güç yoksa test yapılamaz, 0 puan verilir.
         """)
 
-    ataxia = st.radio(
-        "Ataksi",
-        ["Yok (0)", "Bir ekstremite (1)", "İki ekstremite (2)"],
-        horizontal=True,
-        index=0,
-        key="nihss_7"
-    )
+    ataxia = st.radio("Ataksi", ["Yok (0)", "Bir ekstremite (1)", "İki ekstremite (2)"], horizontal=True, index=0, key="nihss_7")
 
     st.markdown("### 12. Duyu (8)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1083,13 +1269,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Hasta cevap veremiyorsa 0 puan verilir.
         """)
 
-    sensory = st.radio(
-        "Duyu",
-        ["Normal (0)", "Hafif/moderat (1)", "Şiddetli (2)"],
-        horizontal=True,
-        index=0,
-        key="nihss_8"
-    )
+    sensory = st.radio("Duyu", ["Normal (0)", "Hafif/moderat (1)", "Şiddetli (2)"], horizontal=True, index=0, key="nihss_8")
 
     st.markdown("### 13. Dil (9)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1110,13 +1290,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Hasta yanıt veremiyorsa 0 puan verilir.
         """)
 
-    language = st.radio(
-        "Dil/Afazi",
-        ["Normal (0)", "Hafif (1)", "Ağır (2)", "Mute/Total (3)"],
-        horizontal=True,
-        index=0,
-        key="nihss_9"
-    )
+    language = st.radio("Dil/Afazi", ["Normal (0)", "Hafif (1)", "Ağır (2)", "Mute/Total (3)"], horizontal=True, index=0, key="nihss_9")
 
     st.markdown("### 14. Dizartri (10)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1136,13 +1310,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Hasta konuşamıyorsa 0 puan verilir.
         """)
 
-    dysarthria = st.radio(
-        "Dizartri",
-        ["Normal (0)", "Hafif (1)", "Ağır (2)"],
-        horizontal=True,
-        index=0,
-        key="nihss_10"
-    )
+    dysarthria = st.radio("Dizartri", ["Normal (0)", "Hafif (1)", "Ağır (2)"], horizontal=True, index=0, key="nihss_10")
 
     st.markdown("### 15. İhmal/Dikkat (11)")
     with st.expander("ℹ️ Nasıl Değerlendirilir?"):
@@ -1162,13 +1330,7 @@ if page == "📊 NIHSS Hesaplayıcı":
         **Önemli:** Hasta testleri yapamıyorsa 0 puan verilir.
         """)
 
-    neglect = st.radio(
-        "İhmal",
-        ["Yok (0)", "Bir duyuda (1)", "İki duyuda (2)"],
-        horizontal=True,
-        index=0,
-        key="nihss_11"
-    )
+    neglect = st.radio("İhmal", ["Yok (0)", "Bir duyuda (1)", "İki duyuda (2)"], horizontal=True, index=0, key="nihss_11")
 
     st.markdown("---")
 
@@ -1222,12 +1384,11 @@ elif page == "🧫 ASPECTS Hesaplayıcı":
     st.markdown("""
     <div class='info-box'>
         <p><strong>ℹ️ ASPECTS (Alberta Stroke Program Early CT Score):</strong><br>
-        BT'de erken iskemi bulgularını değerlendirmek için kullanılan puanlama sistemi. Maksimum puan 10. Hipodens (koyu) görünen bölgeleri işaretleyin.</p>
+        BT'de erken iskemi bulgularını değerlendirmek için kullanılan puanlama sistemi. Maksimum puan 10.</p>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("### MCA Bölgesi (Hemisphere - Derin Yapılar)")
-
     col1, col2 = st.columns(2)
     with col1:
         c = st.checkbox("Caudate nucleus (Hipodens var)", key="aspects_c")
@@ -1237,7 +1398,6 @@ elif page == "🧫 ASPECTS Hesaplayıcı":
         ins = st.checkbox("Insular ribbon (Hipodens var)", key="aspects_ins")
 
     st.markdown("### MCA Bölgesi (Cortex - Korteks)")
-
     col1, col2 = st.columns(2)
     with col1:
         m1 = st.checkbox("M1 - Anterior (Hipodens var)", key="aspects_m1")
@@ -1250,7 +1410,6 @@ elif page == "🧫 ASPECTS Hesaplayıcı":
 
     st.markdown("---")
 
-    # Calculate ASPECTS
     aspects_regions = [c, l, ic, ins, m1, m2, m3, m4, m5, m6]
     total_aspects = 10 - sum(aspects_regions)
     st.session_state.aspects_score = total_aspects
@@ -1288,16 +1447,8 @@ elif page == "🧠 Akut İnme":
 
         tab_text, tab_audio = st.tabs(["✍️ Klavye / Dikte ile Yaz", "🎙️ Doğrudan Ses Kaydet"])
 
-        # ===== TAB 1: METİN GİRİŞİ =====
         with tab_text:
-            clinical_text = st.text_area(
-                "Klinik Metin",
-                height=150,
-                placeholder="Örnek: 72 yaşında erkek hasta, 80 kilo, bilinç açık, tansiyonu 180/100, kan şekeri 120, sol kol 2/5, sol bacak 3/5, konuşma dizartrik, babinski sağda ekstansör, HT ve DM öyküsü var, aspirin kullanıyor...",
-                key="ai_clinical_text",
-                help="Hastanın muayene bulgularını doğal dilde yazın veya cihazınızın mikrofon tuşuyla dikte edin."
-            )
-
+            clinical_text = st.text_area("Klinik Metin", height=150, placeholder="Örnek: 72 yaşında erkek hasta, 80 kilo, bilinç açık, tansiyonu 180/100...", key="ai_clinical_text")
             col_btn1, col_btn2 = st.columns([1, 3])
             with col_btn1:
                 ai_text_submit = st.button("🚀 Metinden Formu Doldur", key="ai_text_submit_btn", use_container_width=True)
@@ -1309,27 +1460,18 @@ elif page == "🧠 Akut İnme":
                     st.warning("⚠️ Lütfen önce klinik metni girin.")
                 else:
                     try:
-                        with st.spinner("🔄 AI metni analiz ediyor ve form alanlarını dolduruyor..."):
+                        with st.spinner("🔄 AI metni analiz ediyor..."):
                             ai_result = get_groq_response_from_text(clinical_text)
                             st.session_state.ai_last_result = ai_result
                             apply_ai_data_to_session(ai_result)
-                        
                         st.success("✅ Form başarıyla dolduruldu!")
                         st.rerun()
-
-                    except json.JSONDecodeError as e:
-                        st.error(f"❌ JSON Parse Hatası: AI'dan gelen yanıt geçerli bir JSON formatında değil. Lütfen tekrar deneyin.\n\nHata: {str(e)}")
-                    except KeyError as e:
-                        st.error(f"❌ API Anahtarı Hatası: Lütfen Streamlit Secrets'a 'GROQ_API_KEY' ekleyin.\n\nHata: {str(e)}")
                     except Exception as e:
-                        st.error(f"❌ Beklenmeyen Hata: {str(e)}\n\nLütfen tekrar deneyin veya metni daha açık yazın.")
+                        st.error(f"❌ Hata: {str(e)}")
 
-        # ===== TAB 2: SES KAYDI =====
         with tab_audio:
             st.markdown("<p style='font-size: 14px; color: #555;'>Mikrofon butonuna basın, muayene bulgularını söyleyin ve kaydı durdurun.</p>", unsafe_allow_html=True)
-            
             audio_value = st.audio_input("🎙️ Ses kaydı yapın", key="ai_audio_input")
-
             col_btn1, col_btn2 = st.columns([1, 3])
             with col_btn1:
                 ai_audio_submit = st.button("🚀 Sesi Analiz Et ve Formu Doldur", key="ai_audio_submit_btn", use_container_width=True)
@@ -1341,23 +1483,16 @@ elif page == "🧠 Akut İnme":
                     st.warning("⚠️ Lütfen önce bir ses kaydı yapın.")
                 else:
                     try:
-                        with st.spinner("🔄 AI ses kaydını analiz ediyor ve form alanlarını dolduruyor..."):
+                        with st.spinner("🔄 AI ses kaydını analiz ediyor..."):
                             audio_bytes = audio_value.read()
                             ai_result = get_groq_response_from_audio(audio_bytes)
                             st.session_state.ai_last_result = ai_result
                             apply_ai_data_to_session(ai_result)
-                        
                         st.success("✅ Ses kaydı analiz edildi ve form dolduruldu!")
                         st.rerun()
-
-                    except json.JSONDecodeError as e:
-                        st.error(f"❌ JSON Parse Hatası: AI'dan gelen yanıt geçerli bir JSON formatında değil. Lütfen tekrar deneyin.\n\nHata: {str(e)}")
-                    except KeyError as e:
-                        st.error(f"❌ API Anahtarı Hatası: Lütfen Streamlit Secrets'a 'GROQ_API_KEY' ekleyin.\n\nHata: {str(e)}")
                     except Exception as e:
-                        st.error(f"❌ Beklenmeyen Hata: {str(e)}\n\nLütfen tekrar deneyin veya sesi daha net kaydedin.")
+                        st.error(f"❌ Hata: {str(e)}")
 
-        # Son AI sonucunu göster (debug/şeffaflık için)
         if st.session_state.ai_last_result:
             with st.expander("🔍 Son AI Çıktısı (JSON)", expanded=False):
                 st.json(st.session_state.ai_last_result)
@@ -1378,7 +1513,7 @@ elif page == "🧠 Akut İnme":
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            last_well_time_text = st.text_input("Son İyi Görülme (dün, 2 gün önce vb.)", "", key="last_well_time_text", help="Örn: dün, 2 gün önce, 3 gün önce")
+            last_well_time_text = st.text_input("Son İyi Görülme (dün, 2 gün önce vb.)", "", key="last_well_time_text")
             last_well_time = st.time_input("Son İyi Görülme Saati", datetime.now().time(), key="last_well_time")
         with col2:
             if st.button("🕐 Şu Anki Saati Al", key="get_current_time"):
@@ -1394,14 +1529,10 @@ elif page == "🧠 Akut İnme":
             history = st.text_area("Hikaye", "", key="history")
 
         st.markdown("---")
-
-        # Kullanılan İlaçlar
         st.markdown("### 💊 Kullanılan İlaçlar")
-        medications = st.text_area("Kullanılan İlaçlar", "", key="medications", help="Hastanın düzenli kullandığı tüm ilaçları yazınız")
+        medications = st.text_area("Kullanılan İlaçlar", "", key="medications")
 
-        # Kronik Hastalıklar
         st.markdown("### 🏥 Kronik Hastalıklar")
-        
         col1, col2, col3 = st.columns(3)
         with col1:
             ht_check = st.checkbox("Hipertansiyon (HT)", key="ht_check")
@@ -1411,9 +1542,7 @@ elif page == "🧠 Akut İnme":
                     ht_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="ht_duration")
                 with col1b:
                     ht_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="ht_unit")
-            if ht_check:
-                ht_note = st.text_input("Açıklama", "", key="ht_note", help="Ek bilgileri buraya yazınız")
-        
+                ht_note = st.text_input("Açıklama", "", key="ht_note")
         with col2:
             dm_check = st.checkbox("Diabetes Mellitus (DM)", key="dm_check")
             if dm_check:
@@ -1422,9 +1551,7 @@ elif page == "🧠 Akut İnme":
                     dm_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="dm_duration")
                 with col2b:
                     dm_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="dm_unit")
-            if dm_check:
-                dm_note = st.text_input("Açıklama", "", key="dm_note", help="Ek bilgileri buraya yazınız")
-        
+                dm_note = st.text_input("Açıklama", "", key="dm_note")
         with col3:
             svo_check = st.checkbox("SVO (İnme Öyküsü)", key="svo_check")
             if svo_check:
@@ -1433,9 +1560,8 @@ elif page == "🧠 Akut İnme":
                     svo_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="svo_duration")
                 with col3b:
                     svo_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="svo_unit")
-            if svo_check:
-                svo_note = st.text_input("Açıklama", "", key="svo_note", help="Ek bilgileri buraya yazınız")
-        
+                svo_note = st.text_input("Açıklama", "", key="svo_note")
+
         col1, col2 = st.columns(2)
         with col1:
             malignancy_check = st.checkbox("Malignite", key="malignancy_check")
@@ -1445,9 +1571,7 @@ elif page == "🧠 Akut İnme":
                     malignancy_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="malignancy_duration")
                 with col1b:
                     malignancy_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="malignancy_unit")
-            if malignancy_check:
-                malignancy_note = st.text_input("Açıklama", "", key="malignancy_note", help="Ek bilgileri buraya yazınız")
-        
+                malignancy_note = st.text_input("Açıklama", "", key="malignancy_note")
         with col2:
             ckd_check = st.checkbox("Kronik Böbrek Yetmezliği (KBY)", key="ckd_check")
             if ckd_check:
@@ -1456,9 +1580,8 @@ elif page == "🧠 Akut İnme":
                     ckd_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="ckd_duration")
                 with col2b:
                     ckd_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="ckd_unit")
-            if ckd_check:
-                ckd_note = st.text_input("Açıklama", "", key="ckd_note", help="Ek bilgileri buraya yazınız")
-        
+                ckd_note = st.text_input("Açıklama", "", key="ckd_note")
+
         col1, col2 = st.columns(2)
         with col1:
             cad_check = st.checkbox("Koroner Arter Hastalığı (KAH)", key="cad_check")
@@ -1468,9 +1591,7 @@ elif page == "🧠 Akut İnme":
                     cad_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="cad_duration")
                 with col1b:
                     cad_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="cad_unit")
-            if cad_check:
-                cad_note = st.text_input("Açıklama", "", key="cad_note", help="Ek bilgileri buraya yazınız")
-        
+                cad_note = st.text_input("Açıklama", "", key="cad_note")
         with col2:
             cabg_check = st.checkbox("CABG (Kalp Bypass)", key="cabg_check")
             if cabg_check:
@@ -1479,9 +1600,8 @@ elif page == "🧠 Akut İnme":
                     cabg_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="cabg_duration")
                 with col2b:
                     cabg_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="cabg_unit")
-            if cabg_check:
-                cabg_note = st.text_input("Açıklama", "", key="cabg_note", help="Ek bilgileri buraya yazınız")
-        
+                cabg_note = st.text_input("Açıklama", "", key="cabg_note")
+
         col1, col2 = st.columns(2)
         with col1:
             other_chronic_check = st.checkbox("Diğer Kronik Hastalık", key="other_chronic_check")
@@ -1492,19 +1612,16 @@ elif page == "🧠 Akut İnme":
                     other_chronic_duration = st.number_input("Süre (sayı)", 0, 100, 0, key="other_chronic_duration")
                 with col1b:
                     other_chronic_unit = st.selectbox("Birim", ["Ay", "Yıl"], key="other_chronic_unit")
-            if other_chronic_check:
-                other_chronic_note = st.text_input("Açıklama", "", key="other_chronic_note", help="Ek bilgileri buraya yazınız")
-        
-        # Özgeçmiş
+                other_chronic_note = st.text_input("Açıklama", "", key="other_chronic_note")
+
         st.markdown("---")
         st.markdown("### 📋 Özgeçmiş")
-        medical_history = st.text_area("Detaylı Özgeçmiş", "", key="medical_history", help="Ameliyatlar, alerjiler, aile öyküsü vb. tüm bilgileri yazınız")
+        medical_history = st.text_area("Detaylı Özgeçmiş", "", key="medical_history")
 
     st.markdown("---")
 
     # VİTAL BULGULAR VE GÜVENLİK
     st.markdown("## 💓 VİTAL BULGULAR VE GÜVENLİK")
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         sbp = st.number_input("Sistolik Tansiyon (mmHg)", 0, 300, 120, key="sbp")
@@ -1515,12 +1632,10 @@ elif page == "🧠 Akut İnme":
     with col4:
         ecg_rhythm = st.selectbox("EKG Ritmi", ["Sinüs", "Atriyal Fibrilasyon", "Diğer"], index=0, key="ecg_rhythm")
 
-    # Tansiyon uyarısı
     if sbp > 185 or dbp > 110:
         st.error("🚨 KAN BASINCI YÜKSEK! SBP > 185 veya DBP > 110 ise TPA KONTRENDİKEDİR!")
 
     st.markdown("### Kontrendikasyonlar")
-
     contraindications = []
     if st.checkbox("Tedaviye semptom başlamasından sonraki 4,5 saat içinde başlanamayacak", key="contra_time_window"):
         contraindications.append("4,5 saat zaman penceresi dışında")
@@ -1548,44 +1663,19 @@ elif page == "🧠 Akut İnme":
 
     # SKOR GİRİŞLERİ VE TPA HESAPLAYICI
     st.markdown("## 📊 SKOR GİRİŞLERİ VE TPA HESAPLAYICI")
-
     col1, col2 = st.columns(2)
     with col1:
-        nihss_input = st.number_input(
-            "NIHSS Skoru (0-42)",
-            0, 42,
-            int(st.session_state.nihss_score),
-            key="nihss_input"
-        )
+        nihss_input = st.number_input("NIHSS Skoru (0-42)", 0, 42, int(st.session_state.nihss_score), key="nihss_input")
         st.info(f"💡 NIHSS Hesaplayıcı'dan gelen skor: {st.session_state.nihss_score}")
     with col2:
-        aspects_input = st.number_input(
-            "ASPECTS Skoru (0-10)",
-            0, 10,
-            int(st.session_state.aspects_score),
-            key="aspects_input"
-        )
+        aspects_input = st.number_input("ASPECTS Skoru (0-10)", 0, 10, int(st.session_state.aspects_score), key="aspects_input")
         st.info(f"💡 ASPECTS Hesaplayıcı'dan gelen skor: {st.session_state.aspects_score}")
 
     if aspects_input < 7:
         st.error("🚨 ASPECTS < 7! Büyük infarkt riski. TPA kontrendike olabilir!")
 
-    st.markdown("### Difüzyon/FLAIR Mismatch")
-    mismatch = st.radio(
-        "Difüzyon/FLAIR Mismatch",
-        ["Hayır", "Evet"],
-        horizontal=True,
-        index=0,
-        key="mismatch",
-        label_visibility="collapsed",
-        help="Uyanma inmeleri için rehberlik sağlar. Evet ise uyanma inmesi düşünülmelidir."
-    )
-
     st.markdown("### 💉 TPA Doz Hesaplayıcı")
-
     if weight > 0:
-        # Standard TPA dosing: 0.9 mg/kg (max 90 mg)
-        # 10% bolus, 90% infusion over 60 minutes
         total_dose = min(0.9 * weight, 90)
         bolus = total_dose * 0.1
         infusion = total_dose * 0.9
@@ -1600,10 +1690,8 @@ elif page == "🧠 Akut İnme":
         </div>
         """, unsafe_allow_html=True)
 
-        # TPA uygunluk kararı
         tpa_contraindicated = False
         reasons = []
-
         if contraindications:
             tpa_contraindicated = True
             reasons.append("Kontrendikasyon mevcut")
@@ -1624,10 +1712,9 @@ elif page == "🧠 Akut İnme":
 
     st.markdown("---")
 
-    # AÇIKLAMALI NÖROLOJİK MUAYENE
+    # NÖROLOJİK MUAYENE
     st.markdown("## 🔬 AÇIKLAMALI NÖROLOJİK MUAYENE")
 
-    # Bilinç/Oryantasyon
     st.markdown("### 🧠 Bilinç ve Oryantasyon")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1646,61 +1733,26 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        consciousness = st.radio(
-            "Bilinç Durumu",
-            ["Açık", "Uykuya Meyilli", "Koma"],
-            horizontal=True,
-            index=0,
-            key="consciousness",
-            label_visibility="collapsed"
-        )
+        consciousness = st.radio("Bilinç Durumu", ["Açık", "Uykuya Meyilli", "Koma"], horizontal=True, index=0, key="consciousness", label_visibility="collapsed")
     with col2:
         consciousness_note = st.text_input("Ek Açıklama", "", key="consciousness_note")
-    
-    # Oryantasyon Soruları
+
     st.markdown("#### 📍 Oryantasyon Soruları")
     col1, col2, col3 = st.columns(3)
     with col1:
-        orientation_time = st.radio(
-            "Zaman (Ay/Yıl)",
-            ["Doğru", "Yanlış", "Bilmiyor"],
-            horizontal=True,
-            index=0,
-            key="orientation_time"
-        )
+        orientation_time = st.radio("Zaman (Ay/Yıl)", ["Doğru", "Yanlış", "Bilmiyor"], horizontal=True, index=0, key="orientation_time")
     with col2:
-        orientation_place = st.radio(
-            "Yer (Neresi)",
-            ["Doğru", "Yanlış", "Bilmiyor"],
-            horizontal=True,
-            index=0,
-            key="orientation_place"
-        )
+        orientation_place = st.radio("Yer (Neresi)", ["Doğru", "Yanlış", "Bilmiyor"], horizontal=True, index=0, key="orientation_place")
     with col3:
-        orientation_person = st.radio(
-            "Kişi (Kendini tanıyor mu)",
-            ["Evet", "Hayır", "Kısmen"],
-            horizontal=True,
-            index=0,
-            key="orientation_person"
-        )
-    
-    # Kooperasyon/Emirleri
+        orientation_person = st.radio("Kişi (Kendini tanıyor mu)", ["Evet", "Hayır", "Kısmen"], horizontal=True, index=0, key="orientation_person")
+
     st.markdown("#### 🤝 Kooperasyon ve Emirlere Uygunluk")
     col1, col2 = st.columns([3, 2])
     with col1:
-        cooperation = st.radio(
-            "Kooperasyon/Emirler",
-            ["Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)"],
-            horizontal=True,
-            index=0,
-            key="cooperation",
-            label_visibility="collapsed"
-        )
+        cooperation = st.radio("Kooperasyon/Emirler", ["Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)"], horizontal=True, index=0, key="cooperation", label_visibility="collapsed")
     with col2:
         cooperation_note = st.text_input("Ek Açıklama", "", key="cooperation_note", help="Örn: Gözlerini aç/kapat, dişlerini göster vb.")
 
-    # Konuşma
     st.markdown("### 💬 Konuşma")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1714,18 +1766,10 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        speech = st.radio(
-            "Konuşma Durumu",
-            ["Doğal", "Dizartri", "Afazi"],
-            horizontal=True,
-            index=0,
-            key="speech",
-            label_visibility="collapsed"
-        )
+        speech = st.radio("Konuşma Durumu", ["Doğal", "Dizartri", "Afazi"], horizontal=True, index=0, key="speech", label_visibility="collapsed")
     with col2:
         speech_note = st.text_input("Ek Açıklama", "", key="speech_note")
 
-    # Kraniyal/Fasiyal
     st.markdown("### 👁️ Kraniyal ve Fasiyal Muayene")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1740,18 +1784,10 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        facial_exam = st.radio(
-            "Fasiyal Muayene",
-            ["Doğal", "Santral Asimetri", "Periferik Asimetri", "Göz Hareket Kısıtlı"],
-            horizontal=True,
-            index=0,
-            key="facial_exam",
-            label_visibility="collapsed"
-        )
+        facial_exam = st.radio("Fasiyal Muayene", ["Doğal", "Santral Asimetri", "Periferik Asimetri", "Göz Hareket Kısıtlı"], horizontal=True, index=0, key="facial_exam", label_visibility="collapsed")
     with col2:
         facial_exam_note = st.text_input("Ek Açıklama", "", key="facial_exam_note")
 
-    # Pupiller
     st.markdown("### 👁️ Pupiller")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1770,27 +1806,12 @@ elif page == "🧠 Akut İnme":
     
     col1, col2, col3 = st.columns([3, 2, 1])
     with col1:
-        pupils = st.radio(
-            "Pupiller",
-            ["İzokorik", "Anizokorik"],
-            horizontal=True,
-            index=0,
-            key="pupils",
-            label_visibility="collapsed"
-        )
+        pupils = st.radio("Pupiller", ["İzokorik", "Anizokorik"], horizontal=True, index=0, key="pupils", label_visibility="collapsed")
     with col2:
-        light_reflex = st.radio(
-            "Işık Refleksi (IR)",
-            ["+/+", "+/-", "-/+", "-/-"],
-            horizontal=True,
-            index=0,
-            key="light_reflex",
-            label_visibility="collapsed"
-        )
+        light_reflex = st.radio("Işık Refleksi (IR)", ["+/+", "+/-", "-/+", "-/-"], horizontal=True, index=0, key="light_reflex", label_visibility="collapsed")
     with col3:
         pupils_note = st.text_input("Ek Açıklama", "", key="pupils_note")
 
-    # Göz Hareketleri (Gaze)
     st.markdown("### 👀 Göz Hareketleri (Gaze)")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1803,18 +1824,10 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        gaze_movement = st.radio(
-            "Göz Hareketleri (GH)",
-            ["Serbest", "Kısıtlı"],
-            horizontal=True,
-            index=0,
-            key="gaze_movement",
-            label_visibility="collapsed"
-        )
+        gaze_movement = st.radio("Göz Hareketleri (GH)", ["Serbest", "Kısıtlı"], horizontal=True, index=0, key="gaze_movement", label_visibility="collapsed")
     with col2:
         gaze_note = st.text_input("Ek Açıklama", "", key="gaze_note")
 
-    # Görme Alanı (Visual Field)
     st.markdown("### 👁️ Görme Alanı")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1829,18 +1842,10 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        visual_field = st.radio(
-            "Görme Alanı",
-            ["Normal", "Hemianopsi", "Hemianopsi+", "Kör"],
-            horizontal=True,
-            index=0,
-            key="visual_field",
-            label_visibility="collapsed"
-        )
+        visual_field = st.radio("Görme Alanı", ["Normal", "Hemianopsi", "Hemianopsi+", "Kör"], horizontal=True, index=0, key="visual_field", label_visibility="collapsed")
     with col2:
         visual_field_note = st.text_input("Ek Açıklama", "", key="visual_field_note")
 
-    # Motor Güç
     st.markdown("### 💪 Motor Güç")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1859,62 +1864,30 @@ elif page == "🧠 Akut İnme":
     with col1:
         col1a, col1b = st.columns([3, 2])
         with col1a:
-            motor_right = st.radio(
-                "Sağ Üst Ekstremite",
-                [5, 4, 3, 2, 1, 0],
-                horizontal=True,
-                index=0,
-                key="motor_right",
-                label_visibility="collapsed"
-            )
+            motor_right = st.radio("Sağ Üst Ekstremite", [5, 4, 3, 2, 1, 0], horizontal=True, index=0, key="motor_right", label_visibility="collapsed")
         with col1b:
             motor_right_note = st.text_input("Ek Açıklama", "", key="motor_right_note")
-        
         col1a, col1b = st.columns([3, 2])
         with col1a:
-            motor_left = st.radio(
-                "Sol Üst Ekstremite",
-                [5, 4, 3, 2, 1, 0],
-                horizontal=True,
-                index=0,
-                key="motor_left",
-                label_visibility="collapsed"
-            )
+            motor_left = st.radio("Sol Üst Ekstremite", [5, 4, 3, 2, 1, 0], horizontal=True, index=0, key="motor_left", label_visibility="collapsed")
         with col1b:
             motor_left_note = st.text_input("Ek Açıklama", "", key="motor_left_note")
-    
     with col2:
         col2a, col2b = st.columns([3, 2])
         with col2a:
-            motor_right_leg = st.radio(
-                "Sağ Alt Ekstremite",
-                [5, 4, 3, 2, 1, 0],
-                horizontal=True,
-                index=0,
-                key="motor_right_leg",
-                label_visibility="collapsed"
-            )
+            motor_right_leg = st.radio("Sağ Alt Ekstremite", [5, 4, 3, 2, 1, 0], horizontal=True, index=0, key="motor_right_leg", label_visibility="collapsed")
         with col2b:
             motor_right_leg_note = st.text_input("Ek Açıklama", "", key="motor_right_leg_note")
-        
         col2a, col2b = st.columns([3, 2])
         with col2a:
-            motor_left_leg = st.radio(
-                "Sol Alt Ekstremite",
-                [5, 4, 3, 2, 1, 0],
-                horizontal=True,
-                index=0,
-                key="motor_left_leg",
-                label_visibility="collapsed"
-            )
+            motor_left_leg = st.radio("Sol Alt Ekstremite", [5, 4, 3, 2, 1, 0], horizontal=True, index=0, key="motor_left_leg", label_visibility="collapsed")
         with col2b:
             motor_left_leg_note = st.text_input("Ek Açıklama", "", key="motor_left_leg_note")
 
-    # Serebellar
     st.markdown("### 🏃 Serebellar Muayene")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
-        **Serebellar muayene:** Beyinciğin kontrol ettiği denge, koordinasyon ve hareket ölçülülüğünü test eder.
+        **Serebellar muayene:** Beyincikğin kontrol ettiği denge, koordinasyon ve hareket ölçülülüğünü test eder.
         
         **Testler:**
         - **Parmak-Burun Testi:** Hasta işaret parmağıyla önce kendi burnuna, sonra hekimin parmağına dokunur.
@@ -1929,18 +1902,10 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        cerebellar = st.radio(
-            "Serebellar Muayene",
-            ["Normal", "Dismetri", "Disdiadokokinezi", "Hepsi Normal"],
-            horizontal=True,
-            index=0,
-            key="cerebellar",
-            label_visibility="collapsed"
-        )
+        cerebellar = st.radio("Serebellar Muayene", ["Normal", "Dismetri", "Disdiadokokinezi", "Hepsi Normal"], horizontal=True, index=0, key="cerebellar", label_visibility="collapsed")
     with col2:
         cerebellar_note = st.text_input("Ek Açıklama", "", key="cerebellar_note")
 
-    # Taban Cilt Refleksi
     st.markdown("### 🦶 Taban Cilt Refleksi (TCR)")
     with st.expander("ℹ️ Açıklama"):
         st.markdown("""
@@ -1954,14 +1919,7 @@ elif page == "🧠 Akut İnme":
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        tcr = st.radio(
-            "Taban Cilt Refleksi",
-            ["Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"],
-            horizontal=True,
-            index=0,
-            key="tcr",
-            label_visibility="collapsed"
-        )
+        tcr = st.radio("Taban Cilt Refleksi", ["Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"], horizontal=True, index=0, key="tcr", label_visibility="collapsed")
     with col2:
         tcr_note = st.text_input("Ek Açıklama", "", key="tcr_note")
 
@@ -1973,10 +1931,8 @@ elif page == "🧠 Akut İnme":
     if st.button("💾 Kaydet ve WhatsApp Özeti Oluştur", key="whatsapp_button"):
         timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-        # TPA uygunluk kararı
         tpa_contraindicated = False
         reasons = []
-
         if contraindications:
             tpa_contraindicated = True
             reasons.append("Kontrendikasyon")
@@ -1993,32 +1949,31 @@ elif page == "🧠 Akut İnme":
         tpa_decision = "❌ VERİLEMEZ" if tpa_contraindicated else "✅ VERİLEBİLİR"
         tpa_reasons = f" ({', '.join(reasons)})" if reasons else ""
 
-        # Kronik hastalıkları birleştir
         chronic_diseases = []
         if ht_check:
-            note_str = f" - {ht_note}" if ht_note else ""
-            chronic_diseases.append(f"HT ({ht_duration} {ht_unit}){note_str}")
+            note_str = f" - {ht_note}" if 'ht_note' in dir() and ht_note else ""
+            chronic_diseases.append(f"HT ({st.session_state.get('ht_duration', 0)} {st.session_state.get('ht_unit', 'Yıl')}){note_str}")
         if dm_check:
-            note_str = f" - {dm_note}" if dm_note else ""
-            chronic_diseases.append(f"DM ({dm_duration} {dm_unit}){note_str}")
+            note_str = f" - {dm_note}" if 'dm_note' in dir() and dm_note else ""
+            chronic_diseases.append(f"DM ({st.session_state.get('dm_duration', 0)} {st.session_state.get('dm_unit', 'Yıl')}){note_str}")
         if svo_check:
-            note_str = f" - {svo_note}" if svo_note else ""
-            chronic_diseases.append(f"SVO ({svo_duration} {svo_unit}){note_str}")
+            note_str = f" - {svo_note}" if 'svo_note' in dir() and svo_note else ""
+            chronic_diseases.append(f"SVO ({st.session_state.get('svo_duration', 0)} {st.session_state.get('svo_unit', 'Yıl')}){note_str}")
         if malignancy_check:
-            note_str = f" - {malignancy_note}" if malignancy_note else ""
-            chronic_diseases.append(f"Malignite ({malignancy_duration} {malignancy_unit}){note_str}")
+            note_str = f" - {malignancy_note}" if 'malignancy_note' in dir() and malignancy_note else ""
+            chronic_diseases.append(f"Malignite ({st.session_state.get('malignancy_duration', 0)} {st.session_state.get('malignancy_unit', 'Yıl')}){note_str}")
         if ckd_check:
-            note_str = f" - {ckd_note}" if ckd_note else ""
-            chronic_diseases.append(f"KBY ({ckd_duration} {ckd_unit}){note_str}")
+            note_str = f" - {ckd_note}" if 'ckd_note' in dir() and ckd_note else ""
+            chronic_diseases.append(f"KBY ({st.session_state.get('ckd_duration', 0)} {st.session_state.get('ckd_unit', 'Yıl')}){note_str}")
         if cad_check:
-            note_str = f" - {cad_note}" if cad_note else ""
-            chronic_diseases.append(f"KAH ({cad_duration} {cad_unit}){note_str}")
+            note_str = f" - {cad_note}" if 'cad_note' in dir() and cad_note else ""
+            chronic_diseases.append(f"KAH ({st.session_state.get('cad_duration', 0)} {st.session_state.get('cad_unit', 'Yıl')}){note_str}")
         if cabg_check:
-            note_str = f" - {cabg_note}" if cabg_note else ""
-            chronic_diseases.append(f"CABG ({cabg_duration} {cabg_unit}){note_str}")
+            note_str = f" - {cabg_note}" if 'cabg_note' in dir() and cabg_note else ""
+            chronic_diseases.append(f"CABG ({st.session_state.get('cabg_duration', 0)} {st.session_state.get('cabg_unit', 'Yıl')}){note_str}")
         if other_chronic_check:
-            note_str = f" - {other_chronic_note}" if other_chronic_note else ""
-            chronic_diseases.append(f"{other_chronic} ({other_chronic_duration} {other_chronic_unit}){note_str}")
+            note_str = f" - {other_chronic_note}" if 'other_chronic_note' in dir() and other_chronic_note else ""
+            chronic_diseases.append(f"{st.session_state.get('other_chronic', 'Diğer')} ({st.session_state.get('other_chronic_duration', 0)} {st.session_state.get('other_chronic_unit', 'Yıl')}){note_str}")
 
         whatsapp_summary = f"""
 🏥 *AKUT İNME HANDOVER*
@@ -2068,7 +2023,13 @@ elif page == "🧠 Akut İnme":
 • Motor: Sağ Üst {motor_right}{f' - {motor_right_note}' if motor_right_note else ''}, Sol Üst {motor_left}{f' - {motor_left_note}' if motor_left_note else ''}, Sağ Alt {motor_right_leg}{f' - {motor_right_leg_note}' if motor_right_leg_note else ''}, Sol Alt {motor_left_leg}{f' - {motor_left_leg_note}' if motor_left_leg_note else ''}
 • Serebellar: {cerebellar}{f' - {cerebellar_note}' if cerebellar_note else ''}
 • TCR: {tcr}{f' - {tcr_note}' if tcr_note else ''}
+
+💉 *TPA KARARI:*
+• {tpa_decision}{tpa_reasons}
         """.strip()
+
+        # WhatsApp özetini session_state'e kaydet (Vaka Transfer için)
+        st.session_state.whatsapp_summary_text = whatsapp_summary
 
         st.markdown(f"""
         <div class='whatsapp-output'>
@@ -2077,119 +2038,47 @@ elif page == "🧠 Akut İnme":
         """, unsafe_allow_html=True)
 
         st.code(whatsapp_summary, language=None)
+        st.info("💡 Bu özeti '📤 Vaka Transfer' sayfasından 4 haneli kod ile paylaşabilirsiniz.")
 
 # ==================== VERTIGO SAYFASI ====================
 elif page == "🌀 Vertigo (HINTS)":
-
     st.markdown("# 🌀 Vertigo ve Baş Dönmesi (HINTS Muayenesi)")
     st.markdown("---")
 
-    # Vertigo History and Vitals
     st.markdown("## 📋 Vertigo Öyküsü ve Vitaller")
-
     col1, col2, col3 = st.columns(3)
     with col1:
-        vertigo_onset = st.selectbox(
-            "Şikayet Başlangıcı",
-            ["Ani (Saniyeler)", "Dakikalar/Saatler", "Günler"],
-            key="vertigo_onset"
-        )
+        vertigo_onset = st.selectbox("Şikayet Başlangıcı", ["Ani (Saniyeler)", "Dakikalar/Saatler", "Günler"], key="vertigo_onset")
     with col2:
-        vertigo_trigger = st.selectbox(
-            "Tetikleyici",
-            ["Baş hareketiyle artıyor", "Sürekli/Spontan"],
-            key="vertigo_trigger"
-        )
+        vertigo_trigger = st.selectbox("Tetikleyici", ["Baş hareketiyle artıyor", "Sürekli/Spontan"], key="vertigo_trigger")
     with col3:
         vertigo_duration = st.text_input("Süre", "", key="vertigo_duration")
 
     st.markdown("### Eşlik Eden Bulgular")
-    accompanying_symptoms = st.multiselect(
-        "Eşlik Eden Bulgular",
-        [
-            "Bulantı/Kusma",
-            "İşitme Kaybı / Tinnitus",
-            "Şiddetli Baş/Ense Ağrısı (Kırmızı Bayrak!)",
-            "Görme Bozukluğu/Çift Görme (Kırmızı Bayrak!)"
-        ],
-        key="accompanying_symptoms",
-        label_visibility="collapsed"
-    )
+    accompanying_symptoms = st.multiselect("Eşlik Eden Bulgular", ["Bulantı/Kusma", "İşitme Kaybı / Tinnitus", "Şiddetli Baş/Ense Ağrısı (Kırmızı Bayrak!)", "Görme Bozukluğu/Çift Görme (Kırmızı Bayrak!)"], key="accompanying_symptoms", label_visibility="collapsed")
 
     st.markdown("---")
-
-    # HINTS + Plus Examination
     st.markdown("## 🔬 HINTS + Plus Muayenesi")
 
-    st.markdown("""
-    <div class='info-box'>
-        <p><strong>ℹ️ HINTS Muayenesi Hakkında:</strong><br>
-        Santral (İnme) ve Periferik (İç Kulak) vertigo ayrımında kullanılır. HINTS = Head Impulse, Nystagmus, Test of Skew. "Plus" = Yeni İşitme Kaybı.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Head Impulse Test
     st.markdown("### 1. Head Impulse Test (vHIT)")
-    head_impulse = st.radio(
-        "Head Impulse Testi",
-        ["Anormal / Gözden Kaçırma Var (Periferik Lehine)", "Normal (Santral İnme Lehine!)"],
-        horizontal=True,
-        key="head_impulse",
-        label_visibility="collapsed"
-    )
-    st.info("ℹ️ Hastanın başını hızla sağa/sola çevirirken burnuna bakmasını iste. Göz hedefi kaçırıp geri yakalıyorsa anormaldir (İç kulak). Tam sabit kalıyorsa ve hasta şiddetli vertigoluyken bu test normalse İNME şüphesi!")
+    head_impulse = st.radio("Head Impulse Testi", ["Anormal / Gözden Kaçırma Var (Periferik Lehine)", "Normal (Santral İnme Lehine!)"], horizontal=True, key="head_impulse", label_visibility="collapsed")
 
-    # Nystagmus
     st.markdown("### 2. Nystagmus")
-    nystagmus = st.radio(
-        "Nistagmus",
-        ["Tek Yönlü Yatay (Periferik)", "Yön Değiştiren / Vertikal (Santral İnme!)", "Yok"],
-        horizontal=True,
-        key="nystagmus",
-        label_visibility="collapsed"
-    )
-    st.info("ℹ️ Sağa bakarken sağa, sola bakarken sola vuruyorsa veya yukarı/aşağı vuruyorsa santraldir.")
+    nystagmus = st.radio("Nistagmus", ["Tek Yönlü Yatay (Periferik)", "Yön Değiştiren / Vertikal (Santral İnme!)", "Yok"], horizontal=True, key="nystagmus", label_visibility="collapsed")
 
-    # Test of Skew
     st.markdown("### 3. Test of Skew (Göz Kayması)")
-    test_skew = st.radio(
-        "Test of Skew",
-        ["Yok (Normal)", "Var / Vertikal Kayma (Santral İnme!)"],
-        horizontal=True,
-        key="test_skew",
-        label_visibility="collapsed"
-    )
-    st.info("ℹ️ Bir gözü kapat, sonra diğerini kapat. Gözlerde yukarı/aşağı dikey bir düzeltme hareketi varsa santraldir.")
+    test_skew = st.radio("Test of Skew", ["Yok (Normal)", "Var / Vertikal Kayma (Santral İnme!)"], horizontal=True, key="test_skew", label_visibility="collapsed")
 
-    # Plus: Hearing Loss
     st.markdown("### 4. Yeni İşitme Kaybı (Plus)")
-    hearing_loss = st.radio(
-        "İşitme Kaybı",
-        ["Yok", "Var (AICA İnmesi şüphesi)"],
-        horizontal=True,
-        key="hearing_loss",
-        label_visibility="collapsed"
-    )
-    st.info("ℹ️ Parmak sürtme testi ile değerlendir.")
+    hearing_loss = st.radio("İşitme Kaybı", ["Yok", "Var (AICA İnmesi şüphesi)"], horizontal=True, key="hearing_loss", label_visibility="collapsed")
 
     st.markdown("---")
-
-    # Positional Test (BPPV)
     st.markdown("## 🔄 Pozisyonel Test (BPPV için)")
-
-    dix_hallpike = st.selectbox(
-        "Dix-Hallpike Testi",
-        ["Yapılmadı", "Negatif", "Sağ BPPV (Nistagmus +)", "Sol BPPV (Nistagmus +)"],
-        key="dix_hallpike"
-    )
-    st.info("ℹ️ Hastayı sedyede hızla geriye yatırıp başını 45 derece sağa/sola çevirerek nistagmus ara.")
+    dix_hallpike = st.selectbox("Dix-Hallpike Testi", ["Yapılmadı", "Negatif", "Sağ BPPV (Nistagmus +)", "Sol BPPV (Nistagmus +)"], key="dix_hallpike")
 
     st.markdown("---")
-
-    # Decision Support
     st.markdown("## 🎯 Karar Destek ve Çıktı")
 
-    # Decision Algorithm
     has_severe_headache = "Şiddetli Baş/Ense Ağrısı (Kırmızı Bayrak!)" in accompanying_symptoms
     has_visual_disturbance = "Görme Bozukluğu/Çift Görme (Kırmızı Bayrak!)" in accompanying_symptoms
     has_central_nystagmus = "Yön Değiştiren / Vertikal (Santral İnme!)" in nystagmus
@@ -2197,15 +2086,7 @@ elif page == "🌀 Vertigo (HINTS)":
     has_normal_head_impulse = "Normal (Santral İnme Lehine!)" in head_impulse
     has_hearing_loss = "Var (AICA İnmesi şüphesi)" in hearing_loss
 
-    # Central Vertigo Risk Assessment
-    central_risk = (
-        has_severe_headache or
-        has_visual_disturbance or
-        has_central_nystagmus or
-        has_central_skew or
-        has_normal_head_impulse or
-        has_hearing_loss
-    )
+    central_risk = (has_severe_headache or has_visual_disturbance or has_central_nystagmus or has_central_skew or has_normal_head_impulse or has_hearing_loss)
 
     if central_risk:
         st.markdown("""
@@ -2216,22 +2097,13 @@ elif page == "🌀 Vertigo (HINTS)":
         </div>
         """, unsafe_allow_html=True)
 
-        # Risk Factors Display
         risk_factors = []
-        if has_severe_headache:
-            risk_factors.append("✓ Şiddetli Baş/Ense Ağrısı (Kırmızı Bayrak)")
-        if has_visual_disturbance:
-            risk_factors.append("✓ Görme Bozukluğu/Çift Görme (Kırmızı Bayrak)")
-        if has_central_nystagmus:
-            risk_factors.append("✓ Santral Nistagmus")
-        if has_central_skew:
-            risk_factors.append("✓ Pozitif Test of Skew")
-        if has_normal_head_impulse:
-            risk_factors.append("✓ Normal Head Impulse (ile şiddetli vertigo!)")
-        if has_hearing_loss:
-            risk_factors.append("✓ Yeni İşitme Kaybı (AICA)")
-
-        st.markdown("**Risk Faktörleri:**")
+        if has_severe_headache: risk_factors.append("✓ Şiddetli Baş/Ense Ağrısı")
+        if has_visual_disturbance: risk_factors.append("✓ Görme Bozukluğu/Çift Görme")
+        if has_central_nystagmus: risk_factors.append("✓ Santral Nistagmus")
+        if has_central_skew: risk_factors.append("✓ Pozitif Test of Skew")
+        if has_normal_head_impulse: risk_factors.append("✓ Normal Head Impulse")
+        if has_hearing_loss: risk_factors.append("✓ Yeni İşitme Kaybı (AICA)")
         for factor in risk_factors:
             st.markdown(f"- {factor}")
     else:
@@ -2242,34 +2114,23 @@ elif page == "🌀 Vertigo (HINTS)":
         </div>
         """, unsafe_allow_html=True)
 
-    # BPPV Assessment
     if "BPPV" in dix_hallpike:
         st.info(f"🔄 {dix_hallpike} - BPPV tanısı ile uyumlu. Epley manevrası düşünülmeli.")
 
     st.markdown("---")
-
-    # WhatsApp Summary
     st.markdown("## 📱 Vertigo WhatsApp Özeti")
 
     if st.button("💾 Vertigo WhatsApp Özeti Oluştur", key="vertigo_whatsapp"):
         timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-
         risk_status = "🚨 SANTRAL VERTİGO / İNME ŞÜPHESİ" if central_risk else "✅ Periferik Vertigo"
 
-        # Risk factors for vertigo
         risk_factors = []
-        if has_severe_headache:
-            risk_factors.append("✓ Şiddetli Baş/Ense Ağrısı (Kırmızı Bayrak)")
-        if has_visual_disturbance:
-            risk_factors.append("✓ Görme Bozukluğu/Çift Görme (Kırmızı Bayrak)")
-        if has_central_nystagmus:
-            risk_factors.append("✓ Santral Nistagmus")
-        if has_central_skew:
-            risk_factors.append("✓ Pozitif Test of Skew")
-        if has_normal_head_impulse:
-            risk_factors.append("✓ Normal Head Impulse (ile şiddetli vertigo!)")
-        if has_hearing_loss:
-            risk_factors.append("✓ Yeni İşitme Kaybı (AICA)")
+        if has_severe_headache: risk_factors.append("✓ Şiddetli Baş/Ense Ağrısı")
+        if has_visual_disturbance: risk_factors.append("✓ Görme Bozukluğu/Çift Görme")
+        if has_central_nystagmus: risk_factors.append("✓ Santral Nistagmus")
+        if has_central_skew: risk_factors.append("✓ Pozitif Test of Skew")
+        if has_normal_head_impulse: risk_factors.append("✓ Normal Head Impulse")
+        if has_hearing_loss: risk_factors.append("✓ Yeni İşitme Kaybı (AICA)")
 
         vertigo_whatsapp_summary = f"""
 🌀 *VERTIGO HANDOVER (HINTS)*
@@ -2315,6 +2176,6 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; padding: 32px; color: var(--primary-active);'>
     <p><strong>⚠️ YASAL UYARI:</strong> Bu uygulama tıbbi kararı desteklemek için tasarlanmıştır, hekim klinik değerlendirmesinin yerini tutmaz.</p>
-    <p style='font-size: 12px; margin-top: 8px;'>Akut İnme ve Vertigo Karar Destek Sistemi v2.2 (AI Destekli - Genişletilmiş JSON)</p>
+    <p style='font-size: 12px; margin-top: 8px;'>Akut İnme ve Vertigo Karar Destek Sistemi v3.0 (AI + Firebase Destekli)</p>
 </div>
 """, unsafe_allow_html=True)
