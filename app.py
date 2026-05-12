@@ -137,11 +137,11 @@ BEKLENEN JSON ŞABLONU VE KABUL EDİLEN DEĞERLER:
   "ekg_ritmi": ("Sinüs", "Atriyal Fibrilasyon", "Diğer" veya null),
   "bilinc_durumu": ("Açık", "Uykuya Meyilli", "Koma" veya null),
   "oryantasyon": {
-    "zaman": ("Doğru", "Yanlış", "Bilmiyor" veya null),
-    "yer": ("Doğru", "Yanlış", "Bilmiyor" veya null),
+    "zaman": ("Evet", "Hayır", "Bilmiyor" veya null),
+    "yer": ("Evet", "Hayır", "Bilmiyor" veya null),
     "kisi": ("Evet", "Hayır", "Kısmen" veya null)
   },
-  "kooperasyon": ("Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)" veya null),
+  "kooperasyon": ("Koopere", "Kısmi Koopere", "Non-Koopere" veya null),
   "konusma": ("Doğal", "Dizartri", "Afazi" veya null),
   "fasiyal_muayene": ("Doğal", "Santral Asimetri", "Periferik Asimetri", "Göz Hareket Kısıtlı" veya null),
   "fasiyal_muayene_aciklama": (Belirtildiyse yaz, örn: "Sağda santral fasyal paralizi", yoksa null),
@@ -161,7 +161,7 @@ BEKLENEN JSON ŞABLONU VE KABUL EDİLEN DEĞERLER:
   "motor_sol_bacak_aciklama": (Belirtildiyse yaz, yoksa null),
   "serebellar_muayene": ("Normal", "Dismetri", "Disdiadokokinezi", "Hepsi Normal" veya null),
   "serebellar_aciklama": (Belirtildiyse yaz, yoksa null),
-  "tcr": ("Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt" veya null),
+  "tcr": ("Bilateral Fleksör", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt" veya null),
   "tcr_aciklama": (Belirtildiyse yaz, yoksa null),
   "duyu_kaybi": (Belirtildiyse yaz, yoksa null),
   "kontrendikasyonlar": (Belirtildiyse liste olarak yaz, örn: ["Aktif kanama", "INR > 1.7"], yoksa []),
@@ -177,15 +177,16 @@ BEKLENEN JSON ŞABLONU VE KABUL EDİLEN DEĞERLER:
 """
 
 
-# Whisper için medikal terim ipuçları
+# Whisper için medikal terim ipuçları (896 karakter limiti altında)
 WHISPER_MEDICAL_PROMPT = (
-    "Tıbbi terimler: Hemianopsi, Dizartri, Afazi, Disdiadokokinezi, İzokorik, Anizokorik, "
-    "Babinski, Ekstansör, Fleksör, Serebellar, Dismetri, ASPECTS, NIHSS, TPA, Alteplaz, "
-    "Hipertansiyon, Diabetes Mellitus, Atriyal Fibrilasyon, Sinüs ritmi, Plejik, "
-    "Hemiparezi, Hemipleji, Stupor, Koma, Kooperatif, Oryantasyon, Fasyal paralizi, "
-    "Santral, Periferik, Pupil, Midriyatik, Miyotik, Işık refleksi, Taban cilt refleksi, "
-    "Koroner arter, CABG, Malignite, Kronik böbrek yetmezliği, SVO, İnme, Vertigo, "
-    "Sistolik, Diastolik, EKG, Antikoagülan, NOAK, INR, aPTT, Trombositopeni."
+    "Nöroloji: Hemianopsi, Dizartri, Afazi, Disdiadokokinezi, İzokorik, Anizokorik, "
+    "Babinski, Ekstansör, Fleksör, Serebellar, Dismetri, NIHSS, TPA, Alteplaz, "
+    "Hipertansiyon, Diabetes, Atriyal Fibrilasyon, Sinüs ritmi, Hemiparezi, Hemipleji, "
+    "Stupor, Koma, Oryantasyon, Fasyal paralizi, Santral, Periferik, Pupil, İnme. "
+    "İlaç: Aspirin, Plavix, Klopidogrel, Metoprolol, Ramipril, Amlodipin, Atorvastatin, "
+    "Rivaroksaban, Apiksaban, Varfarin, Furosemid, Metformin, Sitagliptin, Insulin, "
+    "Salbutamol, Levotiroksin, Pregabalin, Gabapentin, Sertralin, Ketiapin, Olanzapin, "
+    "Pantoprazol, Tamsulosin, Alendronat."
 )
 
 
@@ -321,6 +322,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.ht_check = True
                 if ht.get("aciklama"):
                     st.session_state.ht_note = str(ht["aciklama"])
+                if ht.get("sure"):
+                    st.session_state.ht_sure = str(ht["sure"])
             elif ht.get("var_mi") is False:
                 st.session_state.ht_check = False
 
@@ -331,6 +334,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.dm_check = True
                 if dm.get("aciklama"):
                     st.session_state.dm_note = str(dm["aciklama"])
+                if dm.get("sure"):
+                    st.session_state.dm_sure = str(dm["sure"])
             elif dm.get("var_mi") is False:
                 st.session_state.dm_check = False
 
@@ -341,6 +346,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.svo_check = True
                 if svo.get("aciklama"):
                     st.session_state.svo_note = str(svo["aciklama"])
+                if svo.get("sure"):
+                    st.session_state.svo_sure = str(svo["sure"])
             elif svo.get("var_mi") is False:
                 st.session_state.svo_check = False
 
@@ -351,6 +358,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.malignancy_check = True
                 if mal.get("aciklama"):
                     st.session_state.malignancy_note = str(mal["aciklama"])
+                if mal.get("sure"):
+                    st.session_state.malignancy_sure = str(mal["sure"])
             elif mal.get("var_mi") is False:
                 st.session_state.malignancy_check = False
 
@@ -361,6 +370,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.ckd_check = True
                 if kby.get("aciklama"):
                     st.session_state.ckd_note = str(kby["aciklama"])
+                if kby.get("sure"):
+                    st.session_state.ckd_sure = str(kby["sure"])
             elif kby.get("var_mi") is False:
                 st.session_state.ckd_check = False
 
@@ -371,6 +382,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.cad_check = True
                 if kah.get("aciklama"):
                     st.session_state.cad_note = str(kah["aciklama"])
+                if kah.get("sure"):
+                    st.session_state.cad_sure = str(kah["sure"])
             elif kah.get("var_mi") is False:
                 st.session_state.cad_check = False
 
@@ -381,6 +394,8 @@ def apply_ai_data_to_session(ai_result: dict):
                 st.session_state.cabg_check = True
                 if cabg.get("aciklama"):
                     st.session_state.cabg_note = str(cabg["aciklama"])
+                if cabg.get("sure"):
+                    st.session_state.cabg_sure = str(cabg["sure"])
             elif cabg.get("var_mi") is False:
                 st.session_state.cabg_check = False
 
@@ -393,6 +408,8 @@ def apply_ai_data_to_session(ai_result: dict):
                     st.session_state.other_chronic = str(diger["hastalik_adi"])
                 if diger.get("aciklama"):
                     st.session_state.other_chronic_note = str(diger["aciklama"])
+                if diger.get("sure"):
+                    st.session_state.other_chronic_sure = str(diger["sure"])
             elif diger.get("var_mi") is False:
                 st.session_state.other_chronic_check = False
 
@@ -443,11 +460,11 @@ def apply_ai_data_to_session(ai_result: dict):
     if oryantasyon and isinstance(oryantasyon, dict):
         if oryantasyon.get("zaman") is not None:
             zaman = oryantasyon["zaman"]
-            if zaman in ["Doğru", "Yanlış", "Bilmiyor"]:
+            if zaman in ["Evet", "Hayır", "Bilmiyor"]:
                 st.session_state.orientation_time = zaman
         if oryantasyon.get("yer") is not None:
             yer = oryantasyon["yer"]
-            if yer in ["Doğru", "Yanlış", "Bilmiyor"]:
+            if yer in ["Evet", "Hayır", "Bilmiyor"]:
                 st.session_state.orientation_place = yer
         if oryantasyon.get("kisi") is not None:
             kisi = oryantasyon["kisi"]
@@ -457,7 +474,7 @@ def apply_ai_data_to_session(ai_result: dict):
     # Kooperasyon
     if ai_result.get("kooperasyon") is not None:
         koop = ai_result["kooperasyon"]
-        koop_options = ["Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)"]
+        koop_options = ["Koopere", "Kısmi Koopere", "Non-Koopere"]
         if koop in koop_options:
             st.session_state.cooperation = koop
 
@@ -552,7 +569,7 @@ def apply_ai_data_to_session(ai_result: dict):
     # Taban Cilt Refleksi (TCR)
     if ai_result.get("tcr") is not None:
         tcr_val = ai_result["tcr"]
-        tcr_options = ["Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"]
+        tcr_options = ["Bilateral Fleksör", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"]
         if tcr_val in tcr_options:
             st.session_state.tcr = tcr_val
     
@@ -566,6 +583,14 @@ def apply_ai_data_to_session(ai_result: dict):
     # Ek bulgular
     if ai_result.get("ek_bulgular") is not None:
         st.session_state.ek_bulgular = str(ai_result["ek_bulgular"])
+
+    # Kontrendikasyonlar
+    if ai_result.get("kontrendikasyonlar") is not None:
+        kont = ai_result["kontrendikasyonlar"]
+        if isinstance(kont, list):
+            st.session_state.contraindications = kont
+        else:
+            st.session_state.contraindications = []
 
 
 # ==================== SAYFA YAPILANDIRMASI ====================
@@ -1749,7 +1774,7 @@ elif page == "🧠 Akut İnme":
     st.markdown("#### 🤝 Kooperasyon ve Emirlere Uygunluk")
     col1, col2 = st.columns([3, 2])
     with col1:
-        cooperation = st.radio("Kooperasyon/Emirler", ["Tam Kooperatif (Her emri yapıyor)", "Kısmen Kooperatif (Bazılarını yapıyor)", "Kooperatif Değil (Yapamıyor)"], horizontal=True, index=0, key="cooperation", label_visibility="collapsed")
+        cooperation = st.radio("Kooperasyon/Emirler", ["Koopere", "Kısmi Koopere", "Non-Koopere"], horizontal=True, index=0, key="cooperation", label_visibility="collapsed")
     with col2:
         cooperation_note = st.text_input("Ek Açıklama", "", key="cooperation_note", help="Örn: Gözlerini aç/kapat, dişlerini göster vb.")
 
@@ -1912,14 +1937,14 @@ elif page == "🧠 Akut İnme":
         **Plantar Refleks:** Nörolojik muayenenin en kritik refleks testlerinden biri. Ayak tabanının dış kısmı, topuktan serçe parmağına doğru ucu küt bir cisimle (refleks çekicinin arkası veya anahtar) çizilir ve ayak başparmağının tepkisi gözlemlenir.
         
         **TCR Bulguları:**
-        - **Bilateral Fleksör (Normal):** Ayak başparmağı ve diğer parmaklar içe doğru (aşağıya) kıvrılır. Sağlıklı erişkinlerde beklenen yanıt.
+        - **Bilateral Fleksör:** Ayak başparmağı ve diğer parmaklar içe doğru (aşağıya) kıvrılır. Sağlıklı erişkinlerde beklenen yanıt.
         - **Ekstansör (+) - Babinski:** Ayak başparmağı geriye (yukarı) kalkar ve diğer parmaklar yelpaze gibi açılır. Üst Motor Nöron hasarının en önemli bulgusu.
         - **Lakayt:** Ayak tabanı çizildiğinde parmaklarda hiçbir hareket olmaz. Şiddetli nöropatilerde veya ayağın çok soğuk olmasında görülebilir.
         """)
     
     col1, col2 = st.columns([3, 2])
     with col1:
-        tcr = st.radio("Taban Cilt Refleksi", ["Bilateral Fleksör (Normal)", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"], horizontal=True, index=0, key="tcr", label_visibility="collapsed")
+        tcr = st.radio("Taban Cilt Refleksi", ["Bilateral Fleksör", "Sağ Ekstansör (+)", "Sol Ekstansör (+)", "Lakayt"], horizontal=True, index=0, key="tcr", label_visibility="collapsed")
     with col2:
         tcr_note = st.text_input("Ek Açıklama", "", key="tcr_note")
 
@@ -1929,51 +1954,135 @@ elif page == "🧠 Akut İnme":
     st.markdown("## 📱 WhatsApp Handover")
 
     if st.button("💾 Kaydet ve WhatsApp Özeti Oluştur", key="whatsapp_button"):
-        timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-        tpa_contraindicated = False
-        reasons = []
-        if contraindications:
-            tpa_contraindicated = True
-            reasons.append("Kontrendikasyon")
-        if sbp > 185 or dbp > 110:
-            tpa_contraindicated = True
-            reasons.append("KB Yüksek")
-        if bg < 50:
-            tpa_contraindicated = True
-            reasons.append("Hipoglisemi")
-        if aspects_input < 7:
-            tpa_contraindicated = True
-            reasons.append("ASPECTS<7")
-
-        tpa_decision = "❌ VERİLEMEZ" if tpa_contraindicated else "✅ VERİLEBİLİR"
-        tpa_reasons = f" ({', '.join(reasons)})" if reasons else ""
+        timestamp = datetime.now().strftime("%d.%m.%Y")
 
         chronic_diseases = []
         if ht_check:
-            note_str = f" - {ht_note}" if 'ht_note' in dir() and ht_note else ""
-            chronic_diseases.append(f"HT ({st.session_state.get('ht_duration', 0)} {st.session_state.get('ht_unit', 'Yıl')}){note_str}")
+            ht_duration = st.session_state.get('ht_duration', 0)
+            ht_unit = st.session_state.get('ht_unit', 'Yıl')
+            ht_note = st.session_state.get('ht_note', '')
+            parts = []
+            if ht_duration > 0:
+                parts.append(f"{ht_duration} {ht_unit}")
+            if ht_note:
+                parts.append(ht_note)
+            if parts:
+                chronic_diseases.append(f"HT ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("HT")
         if dm_check:
-            note_str = f" - {dm_note}" if 'dm_note' in dir() and dm_note else ""
-            chronic_diseases.append(f"DM ({st.session_state.get('dm_duration', 0)} {st.session_state.get('dm_unit', 'Yıl')}){note_str}")
+            dm_duration = st.session_state.get('dm_duration', 0)
+            dm_unit = st.session_state.get('dm_unit', 'Yıl')
+            dm_note = st.session_state.get('dm_note', '')
+            parts = []
+            if dm_duration > 0:
+                parts.append(f"{dm_duration} {dm_unit}")
+            if dm_note:
+                parts.append(dm_note)
+            if parts:
+                chronic_diseases.append(f"DM ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("DM")
         if svo_check:
-            note_str = f" - {svo_note}" if 'svo_note' in dir() and svo_note else ""
-            chronic_diseases.append(f"SVO ({st.session_state.get('svo_duration', 0)} {st.session_state.get('svo_unit', 'Yıl')}){note_str}")
+            svo_duration = st.session_state.get('svo_duration', 0)
+            svo_unit = st.session_state.get('svo_unit', 'Yıl')
+            svo_note = st.session_state.get('svo_note', '')
+            parts = []
+            if svo_duration > 0:
+                parts.append(f"{svo_duration} {svo_unit}")
+            if svo_note:
+                parts.append(svo_note)
+            if parts:
+                chronic_diseases.append(f"SVO ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("SVO")
         if malignancy_check:
-            note_str = f" - {malignancy_note}" if 'malignancy_note' in dir() and malignancy_note else ""
-            chronic_diseases.append(f"Malignite ({st.session_state.get('malignancy_duration', 0)} {st.session_state.get('malignancy_unit', 'Yıl')}){note_str}")
+            malignancy_duration = st.session_state.get('malignancy_duration', 0)
+            malignancy_unit = st.session_state.get('malignancy_unit', 'Yıl')
+            malignancy_note = st.session_state.get('malignancy_note', '')
+            parts = []
+            if malignancy_duration > 0:
+                parts.append(f"{malignancy_duration} {malignancy_unit}")
+            if malignancy_note:
+                parts.append(malignancy_note)
+            if parts:
+                chronic_diseases.append(f"Malignite ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("Malignite")
         if ckd_check:
-            note_str = f" - {ckd_note}" if 'ckd_note' in dir() and ckd_note else ""
-            chronic_diseases.append(f"KBY ({st.session_state.get('ckd_duration', 0)} {st.session_state.get('ckd_unit', 'Yıl')}){note_str}")
+            ckd_duration = st.session_state.get('ckd_duration', 0)
+            ckd_unit = st.session_state.get('ckd_unit', 'Yıl')
+            ckd_note = st.session_state.get('ckd_note', '')
+            parts = []
+            if ckd_duration > 0:
+                parts.append(f"{ckd_duration} {ckd_unit}")
+            if ckd_note:
+                parts.append(ckd_note)
+            if parts:
+                chronic_diseases.append(f"KBY ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("KBY")
         if cad_check:
-            note_str = f" - {cad_note}" if 'cad_note' in dir() and cad_note else ""
-            chronic_diseases.append(f"KAH ({st.session_state.get('cad_duration', 0)} {st.session_state.get('cad_unit', 'Yıl')}){note_str}")
+            cad_duration = st.session_state.get('cad_duration', 0)
+            cad_unit = st.session_state.get('cad_unit', 'Yıl')
+            cad_note = st.session_state.get('cad_note', '')
+            parts = []
+            if cad_duration > 0:
+                parts.append(f"{cad_duration} {cad_unit}")
+            if cad_note:
+                parts.append(cad_note)
+            if parts:
+                chronic_diseases.append(f"KAH ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("KAH")
         if cabg_check:
-            note_str = f" - {cabg_note}" if 'cabg_note' in dir() and cabg_note else ""
-            chronic_diseases.append(f"CABG ({st.session_state.get('cabg_duration', 0)} {st.session_state.get('cabg_unit', 'Yıl')}){note_str}")
+            cabg_duration = st.session_state.get('cabg_duration', 0)
+            cabg_unit = st.session_state.get('cabg_unit', 'Yıl')
+            cabg_note = st.session_state.get('cabg_note', '')
+            parts = []
+            if cabg_duration > 0:
+                parts.append(f"{cabg_duration} {cabg_unit}")
+            if cabg_note:
+                parts.append(cabg_note)
+            if parts:
+                chronic_diseases.append(f"CABG ({', '.join(parts)})")
+            else:
+                chronic_diseases.append("CABG")
         if other_chronic_check:
-            note_str = f" - {other_chronic_note}" if 'other_chronic_note' in dir() and other_chronic_note else ""
-            chronic_diseases.append(f"{st.session_state.get('other_chronic', 'Diğer')} ({st.session_state.get('other_chronic_duration', 0)} {st.session_state.get('other_chronic_unit', 'Yıl')}){note_str}")
+            other_chronic_duration = st.session_state.get('other_chronic_duration', 0)
+            other_chronic_unit = st.session_state.get('other_chronic_unit', 'Yıl')
+            other_chronic_note = st.session_state.get('other_chronic_note', '')
+            other_chronic_name = st.session_state.get('other_chronic', 'Diğer')
+            parts = []
+            if other_chronic_duration > 0:
+                parts.append(f"{other_chronic_duration} {other_chronic_unit}")
+            if other_chronic_note:
+                parts.append(other_chronic_note)
+            if parts:
+                chronic_diseases.append(f"{other_chronic_name} ({', '.join(parts)})")
+            else:
+                chronic_diseases.append(other_chronic_name)
+
+        # Oryantasyon değerlerini dönüştür
+        def convert_zamanyer(value):
+            if value == "Doğru":
+                return "oryante"
+            elif value == "Yanlış":
+                return "non-oryante"
+            else:
+                return "bilmiyor"
+
+        def convert_kisi(value):
+            if value == "Evet":
+                return "oryante"
+            elif value == "Hayır":
+                return "non-oryante"
+            else:
+                return "kısmen oryante"
+
+        orientation_time_display = convert_zamanyer(orientation_time)
+        orientation_place_display = convert_zamanyer(orientation_place)
+        orientation_person_display = convert_kisi(orientation_person)
 
         whatsapp_summary = f"""
 🏥 *AKUT İNME HANDOVER*
@@ -2005,15 +2114,12 @@ elif page == "🧠 Akut İnme":
 • Kan Şekeri: {bg} mg/dL
 • EKG Ritmi: {ecg_rhythm}
 
-⚠️ *KONTRENDİKASYONLAR:*
-{chr(10).join(['• ' + c for c in contraindications]) if contraindications else '• Yok'}
-
 📊 *SKORLAR:*
 • NIHSS: {nihss_input}/42
 
 🔬 *NÖROLOJİK MUAYENE:*
 • Bilinç: {consciousness}{f' - {consciousness_note}' if consciousness_note else ''}
-• Oryantasyon: Zaman {orientation_time}, Yer {orientation_place}, Kişi {orientation_person}
+• Oryantasyon: Zaman {orientation_time_display}, Yer {orientation_place_display}, Kişi {orientation_person_display}
 • Kooperasyon: {cooperation}{f' - {cooperation_note}' if cooperation_note else ''}
 • Konuşma: {speech}{f' - {speech_note}' if speech_note else ''}
 • Kraniyal/Fasiyal: {facial_exam}{f' - {facial_exam_note}' if facial_exam_note else ''}
@@ -2023,9 +2129,6 @@ elif page == "🧠 Akut İnme":
 • Motor: Sağ Üst {motor_right}{f' - {motor_right_note}' if motor_right_note else ''}, Sol Üst {motor_left}{f' - {motor_left_note}' if motor_left_note else ''}, Sağ Alt {motor_right_leg}{f' - {motor_right_leg_note}' if motor_right_leg_note else ''}, Sol Alt {motor_left_leg}{f' - {motor_left_leg_note}' if motor_left_leg_note else ''}
 • Serebellar: {cerebellar}{f' - {cerebellar_note}' if cerebellar_note else ''}
 • TCR: {tcr}{f' - {tcr_note}' if tcr_note else ''}
-
-💉 *TPA KARARI:*
-• {tpa_decision}{tpa_reasons}
         """.strip()
 
         # WhatsApp özetini session_state'e kaydet (Vaka Transfer için)
